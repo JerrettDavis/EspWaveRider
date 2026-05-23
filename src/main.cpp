@@ -4,11 +4,25 @@
 #include <Preferences.h>
 #include <PubSubClient.h>
 #include <NimBLEDevice.h>
+#include <HTTPUpdate.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
 #include <Adafruit_NeoPixel.h>
+
+#ifndef ESPWAVERIDER_FIRMWARE_VERSION
+#define ESPWAVERIDER_FIRMWARE_VERSION "dev"
+#endif
+
+#ifndef ESPWAVERIDER_BUILD_TARGET
+#define ESPWAVERIDER_BUILD_TARGET "unknown"
+#endif
+
+#ifndef ESPWAVERIDER_GIT_SHA
+#define ESPWAVERIDER_GIT_SHA "unknown"
+#endif
 
 #include "board_profile.h"
 #include "ble_support.h"
@@ -88,6 +102,8 @@ static constexpr uint16_t MAX_PRESENCE_HOLD_MS = 60000;
 static constexpr uint32_t ROOM_SUMMARY_KEEPALIVE_MS = 10000;
 static constexpr uint16_t ROOM_SUMMARY_DISTANCE_DELTA_CM = 35;
 static constexpr uint8_t ROOM_SUMMARY_ACTIVITY_DELTA = 6;
+static constexpr const char* FIRMWARE_RELEASE_REPO_OWNER = "JerrettDavis";
+static constexpr const char* FIRMWARE_RELEASE_REPO_NAME = "EspWaveRider";
 
 static constexpr uint8_t ENERGY_HEADER[] = {0xF4, 0xF3, 0xF2, 0xF1};
 static constexpr uint8_t ENERGY_FOOTER[] = {0xF8, 0xF7, 0xF6, 0xF5};
@@ -120,6 +136,7 @@ struct UdpDiscoveryPeer {
   String friendlyName;
   String roomId;
   String sensorRole;
+  String firmwareVersion;
   String hostname;
   String ipAddress;
   int32_t wifiRssi = 0;
@@ -207,6 +224,7 @@ struct RoomPeerSummary {
   bool occupied = false;
   String nodeId;
   String sensorRole;
+  String firmwareVersion;
   bool presence = false;
   bool detectionCandidate = false;
   uint8_t peopleEstimate = 0;
@@ -247,6 +265,20 @@ struct RoomAggregateMetrics {
   uint8_t activeNodeCount = 0;
   uint8_t peerNodeCount = 0;
   uint8_t activityScore = 0;
+};
+
+struct FirmwareSyncState {
+  bool pending = false;
+  bool inProgress = false;
+  bool lastSuccess = false;
+  String targetVersion;
+  String targetNodeId;
+  String targetSource;
+  String downloadUrl;
+  String statusText;
+  String lastError;
+  uint32_t lastStartedMs = 0;
+  uint32_t lastCompletedMs = 0;
 };
 
 RuntimeHomeAssistantConfig runtimeConfig;
@@ -300,6 +332,7 @@ bool webSocketServerStarted = false;
 bool dnsServerStarted = false;
 bool mdnsStarted = false;
 bool udpDiscoveryStarted = false;
+FirmwareSyncState firmwareSyncState;
 
 String usbCommandBuffer;
 uint32_t lastWiFiScanMs = 0;
@@ -349,6 +382,18 @@ String sanitizeHostname(const String& value);
 String deviceHostname();
 String deviceHostnameLabel();
 String deviceDashboardUrl();
+const char* firmwareVersion();
+const char* firmwareBuildTarget();
+const char* firmwareGitSha();
+String semanticVersionCore(const String& version);
+int compareSemanticVersions(const String& leftVersion, const String& rightVersion);
+bool findHighestPeerReleaseVersion(String& nodeId, String& version, String& source);
+String firmwareReleaseAssetUrl(const String& versionCore);
+void appendFirmwareSyncJson(String& json);
+void requestFirmwareUpdate(const String& targetVersion, const String& targetNodeId, const String& targetSource);
+void serviceFirmwareSync();
+bool peerVersionMismatch(const String& peerVersion);
+void emitPeerVersionEvent(const char* source, const String& nodeId, const String& peerVersion, bool mismatch);
 String accessPointSsid();
 String accessPointPassword();
 void ensureAccessPointActive();
@@ -564,6 +609,9 @@ String buildDeviceSnapshotJson(int32_t energySince,
   json += ",\"mqtt_host_header\":\"" + jsonEscape(runtimeConfig.mqttHostHeader) + "\"";
   json += ",\"mqtt_username_set\":";
   json += runtimeConfig.mqttUsername.length() > 0 ? "true" : "false";
+  json += ",\"firmware_version\":\"" + jsonEscape(firmwareVersion()) + "\"";
+  json += ",\"build_target\":\"" + jsonEscape(firmwareBuildTarget()) + "\"";
+  json += ",\"git_sha\":\"" + jsonEscape(firmwareGitSha()) + "\"";
   json += ",\"node_id\":\"" + jsonEscape(runtimeConfig.nodeId) + "\"";
   json += ",\"friendly_name\":\"" + jsonEscape(runtimeConfig.friendlyName) + "\"";
   json += ",\"room_id\":\"" + jsonEscape(runtimeConfig.roomId) + "\"";
@@ -639,6 +687,7 @@ String buildDeviceSnapshotJson(int32_t energySince,
   json += ",\"room_active_nodes\":" + String(roomMetrics.activeNodeCount);
   json += ",\"room_peer_nodes\":" + String(roomMetrics.peerNodeCount);
   json += ",\"room_activity_score\":" + String(roomMetrics.activityScore);
+  appendFirmwareSyncJson(json);
   appendUdpDiscoveryPeersJson(json);
   appendRoomPeersJson(json, metrics.dominantGateDistanceCm);
   appendBleSightingsJson(json);
@@ -1165,6 +1214,7 @@ void appendUdpDiscoveryPeersJson(String& json) {
     json += ",\"friendly_name\":\"" + jsonEscape(peer.friendlyName) + "\"";
     json += ",\"room_id\":\"" + jsonEscape(peer.roomId) + "\"";
     json += ",\"sensor_role\":\"" + jsonEscape(peer.sensorRole) + "\"";
+    json += ",\"firmware_version\":\"" + jsonEscape(peer.firmwareVersion) + "\"";
     json += ",\"hostname\":\"" + jsonEscape(peer.hostname) + "\"";
     json += ",\"ip_address\":\"" + jsonEscape(peer.ipAddress) + "\"";
     json += ",\"wifi_rssi_dbm\":" + String(peer.wifiRssi);
@@ -1260,6 +1310,7 @@ void appendRoomPeersJson(String& json, int localDominantGateDistanceCm) {
 
     json += "{\"node_id\":\"" + jsonEscape(peer.nodeId) + "\"";
     json += ",\"sensor_role\":\"" + jsonEscape(peer.sensorRole) + "\"";
+    json += ",\"firmware_version\":\"" + jsonEscape(peer.firmwareVersion) + "\"";
     json += ",\"presence\":" + String(peer.presence ? "true" : "false");
     json += ",\"detection_candidate\":" + String(peer.detectionCandidate ? "true" : "false");
     json += ",\"people_estimate\":" + String(peer.peopleEstimate);
@@ -1302,6 +1353,7 @@ void announceUdpDiscovery(bool emitEvent) {
                    "\"friendly_name\":\"" + jsonEscape(runtimeConfig.friendlyName) + "\"," +
                    "\"room_id\":\"" + jsonEscape(runtimeConfig.roomId) + "\"," +
                    "\"sensor_role\":\"" + jsonEscape(runtimeConfig.sensorRole) + "\"," +
+                   "\"firmware_version\":\"" + jsonEscape(firmwareVersion()) + "\"," +
                    "\"hostname\":\"" + jsonEscape(deviceHostname()) + "\"," +
                    "\"ip_address\":\"" + jsonEscape(WiFi.localIP().toString()) + "\"," +
                    "\"wifi_rssi_dbm\":" + String(WiFi.RSSI()) + "," +
@@ -1381,11 +1433,14 @@ void serviceUdpDiscovery() {
         }
 
         UdpDiscoveryPeer& peer = udpDiscoveryPeers[slot];
+        const bool wasOccupied = peer.occupied;
+        const String previousVersion = peer.firmwareVersion;
         peer.occupied = true;
         peer.nodeId = nodeId;
         peer.friendlyName = jsonFieldString(payload, "friendly_name");
         peer.roomId = jsonFieldString(payload, "room_id");
         peer.sensorRole = jsonFieldString(payload, "sensor_role");
+        peer.firmwareVersion = jsonFieldString(payload, "firmware_version");
         peer.hostname = jsonFieldString(payload, "hostname");
         peer.ipAddress = jsonFieldString(payload, "ip_address");
         if (peer.ipAddress.length() == 0) {
@@ -1396,6 +1451,12 @@ void serviceUdpDiscovery() {
         peer.uptimeSeconds = static_cast<uint32_t>(max(0, jsonFieldInt(payload, "uptime_s", 0)));
         peer.freeHeapBytes = static_cast<uint32_t>(max(0, jsonFieldInt(payload, "free_heap_bytes", 0)));
         peer.lastSeenMs = now;
+
+        const bool mismatch = peerVersionMismatch(peer.firmwareVersion);
+        const bool previousMismatch = peerVersionMismatch(previousVersion);
+        if (!wasOccupied || previousVersion != peer.firmwareVersion || previousMismatch != mismatch) {
+          emitPeerVersionEvent("udp_discovery", peer.nodeId, peer.firmwareVersion, mismatch);
+        }
       }
     }
 
@@ -1440,22 +1501,33 @@ void handleRoomSummaryMessage(const String& topic, const String& payload) {
     return;
   }
 
-  roomPeers[peerSlot].occupied = true;
-  roomPeers[peerSlot].nodeId = peerNodeId;
-  roomPeers[peerSlot].sensorRole = jsonFieldString(payload, "sensor_role");
-  roomPeers[peerSlot].presence = jsonFieldBool(payload, "presence", false);
-  roomPeers[peerSlot].detectionCandidate = jsonFieldBool(payload, "detection_candidate", false);
-  roomPeers[peerSlot].peopleEstimate = static_cast<uint8_t>(max(0, jsonFieldInt(payload, "people_estimate", 0)));
-  roomPeers[peerSlot].activeGateCount = static_cast<uint8_t>(max(0, jsonFieldInt(payload, "active_gate_count", 0)));
-  roomPeers[peerSlot].dominantGateDistanceCm = jsonFieldInt(payload, "dominant_gate_distance_cm", -1);
-  roomPeers[peerSlot].activityScore = static_cast<uint8_t>(max(0, jsonFieldInt(payload, "activity_score", 0)));
-  roomPeers[peerSlot].poseXCm = static_cast<int16_t>(jsonFieldInt(payload, "pose_x_cm", 0));
-  roomPeers[peerSlot].poseYCm = static_cast<int16_t>(jsonFieldInt(payload, "pose_y_cm", 0));
-  roomPeers[peerSlot].headingDeg = static_cast<int16_t>(jsonFieldInt(payload, "heading_deg", -90));
-  roomPeers[peerSlot].roomWidthCm = static_cast<uint16_t>(max(100, jsonFieldInt(payload, "room_width_cm", 600)));
-  roomPeers[peerSlot].roomHeightCm = static_cast<uint16_t>(max(100, jsonFieldInt(payload, "room_height_cm", 400)));
-  updateRoomPeerAngleHint(roomPeers[peerSlot], buildRadarDerivedMetrics().dominantGateDistanceCm, roomPeers[peerSlot].dominantGateDistanceCm);
-  roomPeers[peerSlot].lastUpdatedMs = millis();
+  RoomPeerSummary& peer = roomPeers[peerSlot];
+  const bool wasOccupied = peer.occupied;
+  const String previousVersion = peer.firmwareVersion;
+
+  peer.occupied = true;
+  peer.nodeId = peerNodeId;
+  peer.sensorRole = jsonFieldString(payload, "sensor_role");
+  peer.firmwareVersion = jsonFieldString(payload, "firmware_version");
+  peer.presence = jsonFieldBool(payload, "presence", false);
+  peer.detectionCandidate = jsonFieldBool(payload, "detection_candidate", false);
+  peer.peopleEstimate = static_cast<uint8_t>(max(0, jsonFieldInt(payload, "people_estimate", 0)));
+  peer.activeGateCount = static_cast<uint8_t>(max(0, jsonFieldInt(payload, "active_gate_count", 0)));
+  peer.dominantGateDistanceCm = jsonFieldInt(payload, "dominant_gate_distance_cm", -1);
+  peer.activityScore = static_cast<uint8_t>(max(0, jsonFieldInt(payload, "activity_score", 0)));
+  peer.poseXCm = static_cast<int16_t>(jsonFieldInt(payload, "pose_x_cm", 0));
+  peer.poseYCm = static_cast<int16_t>(jsonFieldInt(payload, "pose_y_cm", 0));
+  peer.headingDeg = static_cast<int16_t>(jsonFieldInt(payload, "heading_deg", -90));
+  peer.roomWidthCm = static_cast<uint16_t>(max(100, jsonFieldInt(payload, "room_width_cm", 600)));
+  peer.roomHeightCm = static_cast<uint16_t>(max(100, jsonFieldInt(payload, "room_height_cm", 400)));
+  updateRoomPeerAngleHint(peer, buildRadarDerivedMetrics().dominantGateDistanceCm, peer.dominantGateDistanceCm);
+  peer.lastUpdatedMs = millis();
+
+  const bool mismatch = peerVersionMismatch(peer.firmwareVersion);
+  const bool previousMismatch = peerVersionMismatch(previousVersion);
+  if (!wasOccupied || previousVersion != peer.firmwareVersion || previousMismatch != mismatch) {
+    emitPeerVersionEvent("room_summary", peer.nodeId, peer.firmwareVersion, mismatch);
+  }
 }
 
 void applyRoomPoseConfig(const String& roomId,
@@ -1629,6 +1701,7 @@ void publishRoomCollaborationSummary() {
                    "\"node_id\":\"" + jsonEscape(runtimeConfig.nodeId) + "\"," +
                    "\"room_id\":\"" + jsonEscape(runtimeConfig.roomId) + "\"," +
                    "\"sensor_role\":\"" + jsonEscape(runtimeConfig.sensorRole) + "\"," +
+                   "\"firmware_version\":\"" + jsonEscape(firmwareVersion()) + "\"," +
                    "\"pose_x_cm\":" + String(runtimeConfig.roomPoseXCm) + "," +
                    "\"pose_y_cm\":" + String(runtimeConfig.roomPoseYCm) + "," +
                    "\"heading_deg\":" + String(runtimeConfig.roomHeadingDeg) + "," +
@@ -2117,6 +2190,7 @@ void publishObservationFeed() {
   String payload = "{";
   payload += "\"node_id\":\"" + jsonEscape(runtimeConfig.nodeId) + "\"";
   payload += ",\"friendly_name\":\"" + jsonEscape(runtimeConfig.friendlyName) + "\"";
+  payload += ",\"firmware_version\":\"" + jsonEscape(firmwareVersion()) + "\"";
   payload += ",\"room_id\":\"" + jsonEscape(runtimeConfig.roomId) + "\"";
   payload += ",\"sensor_role\":\"" + jsonEscape(runtimeConfig.sensorRole) + "\"";
   payload += ",\"device_hostname\":\"" + jsonEscape(deviceHostname()) + "\"";
@@ -2224,6 +2298,7 @@ void publishHomeAssistantDiagnostics() {
 
   String hostnameLabel = deviceHostnameLabel();
   String dashboardUrl = deviceDashboardUrl();
+  HomeAssistantMqttClient.publish(homeAssistantStateTopic("firmware_version").c_str(), firmwareVersion(), true);
   HomeAssistantMqttClient.publish(homeAssistantStateTopic("device_hostname").c_str(), hostnameLabel.c_str(), true);
   HomeAssistantMqttClient.publish(homeAssistantStateTopic("dashboard_url").c_str(), dashboardUrl.c_str(), true);
 
@@ -2310,6 +2385,7 @@ void publishHomeAssistantDiscovery() {
   String wifiRssiTopic = homeAssistantStateTopic("wifi_rssi_dbm");
   String wifiChannelTopic = homeAssistantStateTopic("wifi_channel");
   String ipAddressTopic = homeAssistantStateTopic("ip_address");
+  String firmwareVersionTopic = homeAssistantStateTopic("firmware_version");
   String hostnameTopic = homeAssistantStateTopic("device_hostname");
   String dashboardUrlTopic = homeAssistantStateTopic("dashboard_url");
   String radarFramesTopic = homeAssistantStateTopic("radar_frames_total");
@@ -2395,6 +2471,14 @@ void publishHomeAssistantDiscovery() {
                             availabilityTopic,
                             deviceJson,
                             "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:ip-network\",");
+
+  String firmwareVersionPayload = buildHomeAssistantSensorPayload(
+                           escapedFriendlyName + " Firmware Version",
+                           escapedDeviceId + "_firmware_version",
+                           firmwareVersionTopic,
+                           availabilityTopic,
+                           deviceJson,
+                           "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:tag-text\",");
 
   String hostnamePayload = buildHomeAssistantSensorPayload(
                            escapedFriendlyName + " Hostname",
@@ -2539,6 +2623,7 @@ void publishHomeAssistantDiscovery() {
   String wifiRssiDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "wifi_rssi_dbm");
   String wifiChannelDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "wifi_channel");
   String ipAddressDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "ip_address");
+  String firmwareVersionDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "firmware_version");
   String hostnameDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "device_hostname");
   String dashboardUrlDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "dashboard_url");
   String radarFramesDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "radar_frames_total");
@@ -2564,6 +2649,7 @@ void publishHomeAssistantDiscovery() {
                    HomeAssistantMqttClient.publish(wifiRssiDiscoveryTopic.c_str(), wifiRssiPayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(wifiChannelDiscoveryTopic.c_str(), wifiChannelPayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(ipAddressDiscoveryTopic.c_str(), ipAddressPayload.c_str(), true) &&
+                   HomeAssistantMqttClient.publish(firmwareVersionDiscoveryTopic.c_str(), firmwareVersionPayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(hostnameDiscoveryTopic.c_str(), hostnamePayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(dashboardUrlDiscoveryTopic.c_str(), dashboardUrlPayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(radarFramesDiscoveryTopic.c_str(), radarFramesPayload.c_str(), true) &&
@@ -2665,6 +2751,315 @@ void ensureWiFiConnected() {
   WiFi.setAutoReconnect(true);
   WiFi.setHostname(deviceHostname().c_str());
   WiFi.begin(runtimeConfig.wifiSsid.c_str(), runtimeConfig.wifiPassword.c_str());
+}
+
+const char* firmwareVersion() {
+  return ESPWAVERIDER_FIRMWARE_VERSION;
+}
+
+const char* firmwareBuildTarget() {
+  return ESPWAVERIDER_BUILD_TARGET;
+}
+
+const char* firmwareGitSha() {
+  return ESPWAVERIDER_GIT_SHA;
+}
+
+String semanticVersionCore(const String& version) {
+  String trimmed = version;
+  trimmed.trim();
+  if (trimmed.length() == 0) {
+    return "";
+  }
+
+  int cursor = (trimmed[0] == 'v' || trimmed[0] == 'V') ? 1 : 0;
+  const int majorStart = cursor;
+  while (cursor < trimmed.length() && isDigit(static_cast<unsigned char>(trimmed[cursor]))) {
+    cursor++;
+  }
+  if (cursor <= majorStart || cursor >= trimmed.length() || trimmed[cursor] != '.') {
+    return "";
+  }
+
+  const int minorStart = ++cursor;
+  while (cursor < trimmed.length() && isDigit(static_cast<unsigned char>(trimmed[cursor]))) {
+    cursor++;
+  }
+  if (cursor <= minorStart || cursor >= trimmed.length() || trimmed[cursor] != '.') {
+    return "";
+  }
+
+  const int patchStart = ++cursor;
+  while (cursor < trimmed.length() && isDigit(static_cast<unsigned char>(trimmed[cursor]))) {
+    cursor++;
+  }
+  if (cursor <= patchStart) {
+    return "";
+  }
+
+  return trimmed.substring(majorStart, cursor);
+}
+
+int compareSemanticVersions(const String& leftVersion, const String& rightVersion) {
+  const String leftCore = semanticVersionCore(leftVersion);
+  const String rightCore = semanticVersionCore(rightVersion);
+  if (leftCore.length() == 0 && rightCore.length() == 0) {
+    return 0;
+  }
+  if (leftCore.length() == 0) {
+    return -1;
+  }
+  if (rightCore.length() == 0) {
+    return 1;
+  }
+
+  int leftParts[3] = {0, 0, 0};
+  int rightParts[3] = {0, 0, 0};
+  int partIndex = 0;
+  int start = 0;
+  for (int i = 0; i <= leftCore.length() && partIndex < 3; i++) {
+    if (i == leftCore.length() || leftCore[i] == '.') {
+      leftParts[partIndex++] = leftCore.substring(start, i).toInt();
+      start = i + 1;
+    }
+  }
+  partIndex = 0;
+  start = 0;
+  for (int i = 0; i <= rightCore.length() && partIndex < 3; i++) {
+    if (i == rightCore.length() || rightCore[i] == '.') {
+      rightParts[partIndex++] = rightCore.substring(start, i).toInt();
+      start = i + 1;
+    }
+  }
+
+  for (int i = 0; i < 3; i++) {
+    if (leftParts[i] < rightParts[i]) {
+      return -1;
+    }
+    if (leftParts[i] > rightParts[i]) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+bool findHighestPeerReleaseVersion(String& nodeId, String& version, String& source) {
+  String bestNodeId;
+  String bestVersion;
+  String bestSource;
+
+  const uint32_t now = millis();
+  auto considerPeer = [&](const String& candidateNodeId, const String& candidateVersion, const String& candidateSource) {
+    const String candidateCore = semanticVersionCore(candidateVersion);
+    if (candidateNodeId.length() == 0 || candidateCore.length() == 0) {
+      return;
+    }
+
+    if (bestVersion.length() == 0 || compareSemanticVersions(candidateCore, bestVersion) > 0) {
+      bestNodeId = candidateNodeId;
+      bestVersion = candidateCore;
+      bestSource = candidateSource;
+    }
+  };
+
+  for (uint8_t index = 0; index < MAX_ROOM_PEERS; index++) {
+    const RoomPeerSummary& peer = roomPeers[index];
+    if (!peer.occupied || (now - peer.lastUpdatedMs) > ROOM_PEER_FRESHNESS_MS) {
+      continue;
+    }
+    considerPeer(peer.nodeId, peer.firmwareVersion, "room_summary");
+  }
+
+  for (uint8_t index = 0; index < MAX_UDP_DISCOVERY_PEERS; index++) {
+    const UdpDiscoveryPeer& peer = udpDiscoveryPeers[index];
+    if (!peer.occupied || (now - peer.lastSeenMs) > UDP_DISCOVERY_PEER_FRESHNESS_MS) {
+      continue;
+    }
+    considerPeer(peer.nodeId, peer.firmwareVersion, "udp_discovery");
+  }
+
+  nodeId = bestNodeId;
+  version = bestVersion;
+  source = bestSource;
+  return bestVersion.length() > 0;
+}
+
+String firmwareReleaseAssetUrl(const String& versionCore) {
+  const String normalizedCore = semanticVersionCore(versionCore);
+  if (normalizedCore.length() == 0) {
+    return "";
+  }
+
+  const String tag = "v" + normalizedCore;
+  const String assetName = String("EspWaveRider-") + normalizedCore + "-" + firmwareBuildTarget() + ".bin";
+  return String("https://github.com/") + FIRMWARE_RELEASE_REPO_OWNER + "/" + FIRMWARE_RELEASE_REPO_NAME + "/releases/download/" + tag + "/" + assetName;
+}
+
+void appendFirmwareSyncJson(String& json) {
+  String highestPeerNodeId;
+  String highestPeerVersion;
+  String highestPeerSource;
+  const bool hasPeerRelease = findHighestPeerReleaseVersion(highestPeerNodeId, highestPeerVersion, highestPeerSource);
+  const String localCore = semanticVersionCore(firmwareVersion());
+  const bool syncAvailable = hasPeerRelease && compareSemanticVersions(highestPeerVersion, localCore) > 0;
+
+  json += ",\"firmware_sync\":{";
+  json += "\"local_version_core\":\"" + jsonEscape(localCore) + "\"";
+  json += ",\"highest_peer_node_id\":\"" + jsonEscape(highestPeerNodeId) + "\"";
+  json += ",\"highest_peer_version\":\"" + jsonEscape(highestPeerVersion) + "\"";
+  json += ",\"highest_peer_source\":\"" + jsonEscape(highestPeerSource) + "\"";
+  json += ",\"sync_available\":";
+  json += syncAvailable ? "true" : "false";
+  json += ",\"in_progress\":";
+  json += firmwareSyncState.inProgress ? "true" : "false";
+  json += ",\"pending\":";
+  json += firmwareSyncState.pending ? "true" : "false";
+  json += ",\"target_version\":\"" + jsonEscape(firmwareSyncState.targetVersion) + "\"";
+  json += ",\"target_node_id\":\"" + jsonEscape(firmwareSyncState.targetNodeId) + "\"";
+  json += ",\"target_source\":\"" + jsonEscape(firmwareSyncState.targetSource) + "\"";
+  json += ",\"download_url\":\"" + jsonEscape(firmwareSyncState.downloadUrl) + "\"";
+  json += ",\"status\":\"" + jsonEscape(firmwareSyncState.statusText) + "\"";
+  json += ",\"last_error\":\"" + jsonEscape(firmwareSyncState.lastError) + "\"";
+  json += ",\"last_started_ms\":" + String(firmwareSyncState.lastStartedMs);
+  json += ",\"last_completed_ms\":" + String(firmwareSyncState.lastCompletedMs);
+  json += ",\"last_success\":";
+  json += firmwareSyncState.lastSuccess ? "true" : "false";
+  json += "}";
+}
+
+void requestFirmwareUpdate(const String& targetVersion, const String& targetNodeId, const String& targetSource) {
+  const String targetCore = semanticVersionCore(targetVersion);
+  if (targetCore.length() == 0) {
+    firmwareSyncState.lastSuccess = false;
+    firmwareSyncState.lastError = "target_version_is_not_a_release";
+    firmwareSyncState.statusText = "Peer version is not a release build; GitHub sync is unavailable.";
+    firmwareSyncState.lastCompletedMs = millis();
+    emitErrorEvent("firmware_update_invalid_target_version");
+    return;
+  }
+
+  if (firmwareSyncState.pending || firmwareSyncState.inProgress) {
+    firmwareSyncState.lastSuccess = false;
+    firmwareSyncState.lastError = "firmware_sync_busy";
+    firmwareSyncState.statusText = "Firmware sync already in progress.";
+    firmwareSyncState.lastCompletedMs = millis();
+    emitErrorEvent("firmware_sync_busy");
+    return;
+  }
+
+  firmwareSyncState.pending = true;
+  firmwareSyncState.lastSuccess = false;
+  firmwareSyncState.targetVersion = targetCore;
+  firmwareSyncState.targetNodeId = targetNodeId;
+  firmwareSyncState.targetSource = targetSource;
+  firmwareSyncState.downloadUrl = firmwareReleaseAssetUrl(targetCore);
+  firmwareSyncState.lastError = "";
+  firmwareSyncState.statusText = String("Queued firmware sync to ") + targetCore;
+
+  printJsonEventPrefix("firmware_sync_queued");
+  Serial.print(",\"target_version\":");
+  printJsonString(targetCore);
+  Serial.print(",\"target_node_id\":");
+  printJsonString(targetNodeId);
+  Serial.print(",\"target_source\":");
+  printJsonString(targetSource);
+  finishJsonEvent();
+}
+
+void serviceFirmwareSync() {
+  if (!firmwareSyncState.pending || firmwareSyncState.inProgress) {
+    return;
+  }
+
+  firmwareSyncState.pending = false;
+  firmwareSyncState.inProgress = true;
+  firmwareSyncState.lastStartedMs = millis();
+  firmwareSyncState.lastError = "";
+  firmwareSyncState.statusText = String("Downloading firmware ") + firmwareSyncState.targetVersion + " from GitHub...";
+
+  if (WiFi.status() != WL_CONNECTED) {
+    firmwareSyncState.inProgress = false;
+    firmwareSyncState.lastSuccess = false;
+    firmwareSyncState.lastError = "wifi_not_connected";
+    firmwareSyncState.statusText = "Firmware sync failed: Wi-Fi is not connected.";
+    firmwareSyncState.lastCompletedMs = millis();
+    emitErrorEvent("firmware_sync_wifi_not_connected");
+    return;
+  }
+
+  if (firmwareSyncState.downloadUrl.length() == 0) {
+    firmwareSyncState.inProgress = false;
+    firmwareSyncState.lastSuccess = false;
+    firmwareSyncState.lastError = "download_url_missing";
+    firmwareSyncState.statusText = "Firmware sync failed: no release asset URL was available.";
+    firmwareSyncState.lastCompletedMs = millis();
+    emitErrorEvent("firmware_sync_missing_download_url");
+    return;
+  }
+
+  printJsonEventPrefix("firmware_sync_started");
+  Serial.print(",\"target_version\":");
+  printJsonString(firmwareSyncState.targetVersion);
+  Serial.print(",\"download_url\":");
+  printJsonString(firmwareSyncState.downloadUrl);
+  finishJsonEvent();
+  broadcastDeviceSnapshot();
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  httpUpdate.rebootOnUpdate(false);
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  const t_httpUpdate_return result = httpUpdate.update(client, firmwareSyncState.downloadUrl);
+
+  if (result == HTTP_UPDATE_OK) {
+    firmwareSyncState.inProgress = false;
+    firmwareSyncState.lastSuccess = true;
+    firmwareSyncState.statusText = String("Firmware ") + firmwareSyncState.targetVersion + " applied; rebooting.";
+    firmwareSyncState.lastCompletedMs = millis();
+
+    printJsonEventPrefix("firmware_sync_applied");
+    Serial.print(",\"target_version\":");
+    printJsonString(firmwareSyncState.targetVersion);
+    finishJsonEvent();
+    broadcastDeviceSnapshot();
+    delay(250);
+    ESP.restart();
+    return;
+  }
+
+  firmwareSyncState.inProgress = false;
+  firmwareSyncState.lastSuccess = false;
+  firmwareSyncState.lastError = httpUpdate.getLastErrorString();
+  firmwareSyncState.statusText = String("Firmware sync failed: ") + firmwareSyncState.lastError;
+  firmwareSyncState.lastCompletedMs = millis();
+
+  printJsonEventPrefix("firmware_sync_failed");
+  Serial.print(",\"target_version\":");
+  printJsonString(firmwareSyncState.targetVersion);
+  Serial.print(",\"error\":");
+  printJsonString(firmwareSyncState.lastError);
+  finishJsonEvent();
+  broadcastDeviceSnapshot();
+}
+
+bool peerVersionMismatch(const String& peerVersion) {
+  return peerVersion.length() == 0 || peerVersion != firmwareVersion();
+}
+
+void emitPeerVersionEvent(const char* source, const String& nodeId, const String& peerVersion, bool mismatch) {
+  printJsonEventPrefix(mismatch ? "peer_version_mismatch" : "peer_version_match");
+  Serial.print(",\"source\":");
+  printJsonString(source != nullptr ? source : "unknown");
+  Serial.print(",\"node_id\":");
+  printJsonString(nodeId);
+  Serial.print(",\"local_version\":");
+  printJsonString(firmwareVersion());
+  Serial.print(",\"peer_version\":");
+  printJsonString(peerVersion.length() > 0 ? peerVersion : String("unknown"));
+  Serial.print(",\"mismatch\":");
+  Serial.print(mismatch ? "true" : "false");
+  finishJsonEvent();
 }
 
 void ensureMqttConnected() {
@@ -3357,6 +3752,8 @@ void pollPresence() {
 //   ble_tag_clear:<slot>
 //   ha_ws_config:<enabled>|<path>|<host_header>
 //   ha_mqtt_endpoint:<mqtt_host>|<mqtt_port>|<use_websockets>|<websocket_path>|<host_header>
+//   firmware_sync
+//   firmware_update:<version>
 //   energy
 //   radar:hello
 //
@@ -3638,6 +4035,45 @@ void handleUsbCommand(const String& command) {
     return;
   }
 
+  if (command == "firmware_sync") {
+    String nodeId;
+    String version;
+    String source;
+    const String localCore = semanticVersionCore(firmwareVersion());
+
+    if (!findHighestPeerReleaseVersion(nodeId, version, source)) {
+      firmwareSyncState.lastSuccess = false;
+      firmwareSyncState.lastError = "no_peer_release_candidate";
+      firmwareSyncState.statusText = "No peer release version is available to sync from.";
+      firmwareSyncState.lastCompletedMs = millis();
+      emitErrorEvent("firmware_sync_no_peer_release_candidate");
+      return;
+    }
+
+    if (compareSemanticVersions(version, localCore) <= 0) {
+      firmwareSyncState.lastSuccess = true;
+      firmwareSyncState.lastError = "";
+      firmwareSyncState.statusText = "Already on the highest visible peer release.";
+      firmwareSyncState.lastCompletedMs = millis();
+
+      printJsonEventPrefix("firmware_sync_not_needed");
+      Serial.print(",\"local_version\":");
+      printJsonString(localCore);
+      Serial.print(",\"peer_version\":");
+      printJsonString(version);
+      finishJsonEvent();
+      return;
+    }
+
+    requestFirmwareUpdate(version, nodeId, source);
+    return;
+  }
+
+  if (command.startsWith("firmware_update:")) {
+    requestFirmwareUpdate(command.substring(strlen("firmware_update:")), "manual", "manual");
+    return;
+  }
+
   if (command == "energy") {
     configureLd2420EnergyMode();
     return;
@@ -3804,6 +4240,8 @@ void loop() {
   handleDeviceWebServer();
   ensureBleScannerActive();
   ensureWiFiConnected();
+  serviceFirmwareSync();
+  serviceUdpDiscovery();
   ensureMqttConnected();
 
   uint32_t now = millis();

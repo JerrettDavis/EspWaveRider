@@ -276,6 +276,39 @@
       font-size: 14px;
     }
 
+    .status-pill.warn {
+      border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+      background: color-mix(in srgb, var(--warn) 14%, var(--panel-2));
+      color: var(--text);
+    }
+
+    .version-banner {
+      display: none;
+      gap: 10px;
+      align-items: flex-start;
+      border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border));
+      background: color-mix(in srgb, var(--warn) 12%, var(--panel));
+      border-radius: 16px;
+      padding: 14px 16px;
+    }
+
+    .version-banner.visible {
+      display: grid;
+    }
+
+    .version-banner-title {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--warn);
+      font-weight: 800;
+    }
+
+    .version-banner-body {
+      color: var(--text);
+      line-height: 1.5;
+    }
+
     .dot {
       width: 10px;
       height: 10px;
@@ -726,6 +759,15 @@
           <span id="connectionText">Disconnected</span>
         </span>
 
+        <span class="status-pill">
+          <span id="firmwareVersionText">Firmware: waiting</span>
+        </span>
+
+        <span id="peerVersionPill" class="status-pill warn" hidden>
+          <span class="dot warn"></span>
+          <span id="peerVersionPillText">Peer version mismatch</span>
+        </span>
+
         <input id="commandInput" placeholder="serial command: ping, status, energy" />
         <button id="sendButton">Send</button>
       </div>
@@ -745,6 +787,11 @@
       </div>
 
       <div id="dashboardPanel" class="view-panel active">
+        <div id="versionBanner" class="version-banner" role="status" aria-live="polite">
+          <div class="version-banner-title">Version Warning</div>
+          <div id="versionBannerText" class="version-banner-body">Waiting for version telemetry.</div>
+        </div>
+
         <div class="shell-grid">
           <div class="helper-grid">
             <article class="helper-card">
@@ -764,6 +811,17 @@
               <div class="helper-actions">
                 <button id="dashboardOpenConsoleButton" type="button">Open Console</button>
               </div>
+            </article>
+
+            <article class="helper-card">
+              <div class="mini-status"><span class="mini-dot"></span><span>Firmware Sync</span></div>
+              <h3>Converge To Highest Peer Release</h3>
+              <p>Older nodes can self-update to the highest release version visible on the room mesh. The update is downloaded from GitHub for this node's board target.</p>
+              <div id="firmwareSyncCandidate" class="topic-value">No higher peer release visible.</div>
+              <div class="helper-actions">
+                <button id="firmwareSyncButton" type="button" disabled>Sync To Highest Peer</button>
+              </div>
+              <p id="firmwareSyncStatus" class="hint">Waiting for firmware sync telemetry.</p>
             </article>
           </div>
 
@@ -1369,6 +1427,9 @@
       dashboardOpenSetupButton: document.getElementById("dashboardOpenSetupButton"),
       dashboardOpenSensorsButton: document.getElementById("dashboardOpenSensorsButton"),
       dashboardOpenConsoleButton: document.getElementById("dashboardOpenConsoleButton"),
+      firmwareSyncButton: document.getElementById("firmwareSyncButton"),
+      firmwareSyncCandidate: document.getElementById("firmwareSyncCandidate"),
+      firmwareSyncStatus: document.getElementById("firmwareSyncStatus"),
       wizardConnectButton: document.getElementById("wizardConnectButton"),
       wizardStatusButton: document.getElementById("wizardStatusButton"),
       wizardScanWifiButton: document.getElementById("wizardScanWifiButton"),
@@ -1447,6 +1508,11 @@
       wifiReasonText: document.getElementById("wifiReasonText"),
       connectionDot: document.getElementById("connectionDot"),
       connectionText: document.getElementById("connectionText"),
+      firmwareVersionText: document.getElementById("firmwareVersionText"),
+      peerVersionPill: document.getElementById("peerVersionPill"),
+      peerVersionPillText: document.getElementById("peerVersionPillText"),
+      versionBanner: document.getElementById("versionBanner"),
+      versionBannerText: document.getElementById("versionBannerText"),
       presenceCard: document.getElementById("presenceCard"),
       presenceText: document.getElementById("presenceText"),
       presenceSubtext: document.getElementById("presenceSubtext"),
@@ -1516,6 +1582,56 @@
       els.calibrationStatus.textContent = text || "";
     }
 
+    function updateFirmwareSyncStatus(snapshot = lastUiSnapshot) {
+      const sync = snapshot?.firmware_sync || {};
+      const highestPeerVersion = String(sync.highest_peer_version || "").trim();
+      const highestPeerNodeId = String(sync.highest_peer_node_id || "").trim();
+      const localCore = String(sync.local_version_core || "").trim();
+      const syncAvailable = !!sync.sync_available;
+      const inProgress = !!sync.in_progress;
+      const pending = !!sync.pending;
+
+      if (highestPeerVersion && highestPeerNodeId) {
+        setTextContentIfChanged(
+          els.firmwareSyncCandidate,
+          `Highest peer release: ${highestPeerVersion} from ${highestPeerNodeId}${sync.highest_peer_source ? ` via ${sync.highest_peer_source}` : ""}`
+        );
+      } else if (localCore) {
+        setTextContentIfChanged(els.firmwareSyncCandidate, `Local release core: ${localCore}. No peer release candidate is visible.`);
+      } else {
+        setTextContentIfChanged(els.firmwareSyncCandidate, "Local build is not on a tagged release. No higher peer release visible.");
+      }
+
+      els.firmwareSyncButton.disabled = inProgress || pending || !syncAvailable;
+
+      if (inProgress) {
+        setTextContentIfChanged(els.firmwareSyncStatus, sync.status || "Downloading firmware update from GitHub...");
+        return;
+      }
+
+      if (pending) {
+        setTextContentIfChanged(els.firmwareSyncStatus, sync.status || "Firmware sync queued.");
+        return;
+      }
+
+      if (syncAvailable) {
+        setTextContentIfChanged(els.firmwareSyncStatus, sync.status || `A newer peer release (${highestPeerVersion}) is available for this node.`);
+        return;
+      }
+
+      if (sync.last_error) {
+        setTextContentIfChanged(els.firmwareSyncStatus, `Last sync result: ${sync.last_error}`);
+        return;
+      }
+
+      if (sync.last_success) {
+        setTextContentIfChanged(els.firmwareSyncStatus, sync.status || "Already aligned with the highest visible peer release.");
+        return;
+      }
+
+      setTextContentIfChanged(els.firmwareSyncStatus, sync.status || "No higher peer release is available to sync from.");
+    }
+
     function findUdpDiscoveryPeer(nodeId) {
       return latestUdpDiscoveryPeers.find(peer => (peer.node_id || "") === nodeId) || null;
     }
@@ -1542,6 +1658,88 @@
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-+|-+$/g, "");
       return normalized;
+    }
+
+    function localFirmwareVersion() {
+      return String(lastUiSnapshot?.firmware_version || "").trim();
+    }
+
+    function normalizePeerVersion(peer) {
+      const version = String(peer?.firmware_version || "").trim();
+      return version || "unknown";
+    }
+
+    function peerVersionEntries() {
+      const entries = new Map();
+
+      latestRoomPeers.forEach(peer => {
+        const nodeId = String(peer.node_id || "").trim();
+        if (!nodeId) return;
+        entries.set(nodeId, {
+          node_id: nodeId,
+          friendly_name: peer.friendly_name || nodeId,
+          firmware_version: String(peer.firmware_version || "").trim(),
+          room_id: peer.room_id || lastUiSnapshot?.room_id || "room-default",
+          sensor_role: peer.sensor_role || "peer",
+          hostname: peer.hostname || hostnameFromNodeId(nodeId),
+          ip_address: peer.ip_address || ""
+        });
+      });
+
+      latestUdpDiscoveryPeers.forEach(peer => {
+        const nodeId = String(peer.node_id || "").trim();
+        if (!nodeId) return;
+        const existing = entries.get(nodeId) || {};
+        entries.set(nodeId, {
+          ...existing,
+          ...peer,
+          node_id: nodeId,
+          hostname: peer.hostname || existing.hostname || hostnameFromNodeId(nodeId),
+          firmware_version: String(peer.firmware_version || existing.firmware_version || "").trim()
+        });
+      });
+
+      return Array.from(entries.values());
+    }
+
+    function versionMismatchPeers() {
+      const localVersion = localFirmwareVersion();
+      if (!localVersion) return [];
+
+      return peerVersionEntries()
+        .filter(peer => peer.node_id !== currentLocalNodeId())
+        .map(peer => ({
+          nodeId: peer.node_id,
+          version: normalizePeerVersion(peer)
+        }))
+        .filter(peer => peer.version !== localVersion);
+    }
+
+    function updateVersionStatus(snapshot = lastUiSnapshot) {
+      const version = String(snapshot?.firmware_version || "").trim();
+      const buildTarget = String(snapshot?.build_target || "").trim();
+      setTextContentIfChanged(
+        els.firmwareVersionText,
+        version ? `Firmware: ${version}${buildTarget ? ` (${buildTarget})` : ""}` : "Firmware: waiting"
+      );
+
+      const mismatches = versionMismatchPeers();
+      const hasMismatches = mismatches.length > 0;
+      els.peerVersionPill.hidden = !hasMismatches;
+      els.versionBanner.classList.toggle("visible", hasMismatches);
+
+      if (!hasMismatches) {
+        setTextContentIfChanged(els.peerVersionPillText, "Peer versions aligned");
+        setTextContentIfChanged(els.versionBannerText, "All visible peers match this node's firmware version.");
+        return;
+      }
+
+      const mismatchText = mismatches.map(peer => `${peer.nodeId} on ${peer.version}`).join("; ");
+      setTextContentIfChanged(els.peerVersionPillText, `${mismatches.length} peer version mismatch${mismatches.length === 1 ? "" : "es"}`);
+      setTextContentIfChanged(
+        els.versionBannerText,
+        `Local firmware is ${version || "unknown"}. Detected peers on different or unknown versions: ${mismatchText}. Update mixed nodes before trusting cross-node behavior.`
+      );
     }
 
     function peerNavigationEntries() {
@@ -1601,7 +1799,9 @@
 
         const meta = document.createElement("div");
         meta.className = "peer-link-meta";
-        meta.textContent = `${peer.node_id || "unknown"} • ${peer.room_id || "room-default"} • ${peer.sensor_role || "peer"}`;
+        const peerVersion = normalizePeerVersion(peer);
+        const mismatch = !!localFirmwareVersion() && peerVersion !== localFirmwareVersion();
+        meta.textContent = `${peer.node_id || "unknown"} • ${peer.room_id || "room-default"} • ${peer.sensor_role || "peer"} • fw ${peerVersion}${mismatch ? " • mismatch" : ""}`;
 
         top.appendChild(name);
         top.appendChild(meta);
@@ -2496,6 +2696,8 @@
       populateRoomEditorTargetOptions();
       populateCalibrationTargetOptions();
       renderPeerLinks();
+      updateVersionStatus(snapshot);
+      updateFirmwareSyncStatus(snapshot);
 
       applyHaConfig(snapshot);
       if (!shouldPreserveSelectedRoomDraft()) {
@@ -3238,6 +3440,8 @@
 
       populateCalibrationTargetOptions();
       renderPeerLinks();
+      updateVersionStatus(lastUiSnapshot || event);
+      updateFirmwareSyncStatus(lastUiSnapshot || event);
 
       if (typeof event.status_led_hex === "string" && event.status_led_hex.length === 6) {
         els.statusLedSwatch.style.background = `#${event.status_led_hex}`;
@@ -4103,6 +4307,8 @@
       populateCalibrationTargetOptions();
       renderPeerLinks();
       renderCalibrationState();
+      setTextContentIfChanged(els.firmwareSyncCandidate, "No higher peer release visible.");
+      setTextContentIfChanged(els.firmwareSyncStatus, "Waiting for firmware sync telemetry.");
       setRoomEditorStatus("");
       els.statusLedSwatch.style.background = "#000000";
       els.statusLedText.textContent = "—";
@@ -4223,6 +4429,10 @@
     els.dashboardOpenSetupButton.addEventListener("click", () => setCurrentView("setup"));
     els.dashboardOpenSensorsButton.addEventListener("click", () => setCurrentView("sensors"));
     els.dashboardOpenConsoleButton.addEventListener("click", () => setCurrentView("console"));
+    els.firmwareSyncButton.addEventListener("click", () => {
+      setTextContentIfChanged(els.firmwareSyncStatus, "Queuing firmware sync to the highest visible peer release...");
+      sendCommandText("firmware_sync").catch(error => addEvent({ event: "write_error", ms: performance.now(), error: String(error) }));
+    });
     els.wizardConnectButton.addEventListener("click", () => {
       if (port) return;
       els.connectButton.click();

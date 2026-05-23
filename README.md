@@ -1,15 +1,5 @@
 # EspWaveRider
 
-Working title for a portable ESP32 mmWave presence and telemetry firmware stack with Home Assistant, BLE observation, room fusion, and a hosted diagnostics UI.
-The firmware is now organized so hardware mapping is configurable without touching application logic. The intended workflow is: pull the repo, tweak a few pin-related macros, then build and flash.
-
-## Current targets
-
-- `esp32-s3-devkitm-1`: current validated primary target
-- `esp32dev-uart1`: generic ESP32 example target
-- `heltec-wifi-lora-32-v3`: Heltec WiFi LoRa 32 V3 target
-# EspWaveRider
-
 Portable ESP32 mmWave presence and telemetry firmware with a hosted diagnostics UI, BLE observation, room fusion, and Home Assistant/MQTT integration.
 
 The repo is structured so hardware wiring can be remapped without editing application logic. The normal workflow is: choose a PlatformIO environment, optionally override a few board macros, then build and flash.
@@ -20,6 +10,8 @@ The repo is structured so hardware wiring can be remapped without editing applic
 - Tracks local presence, activity, and room-level fused state
 - Publishes device and observation data to MQTT / Home Assistant
 - Hosts a built-in device UI for setup, diagnostics, room editing, and sensor inspection
+- Reports firmware version/build metadata in both the device UI and diagnostics payloads
+- Detects peer firmware mismatches and exposes the highest visible peer release for safe OTA sync
 - Supports board-specific wiring through a small HAL layer
 
 ## Supported environments
@@ -118,6 +110,20 @@ C:\Users\jd\.platformio\penv\Scripts\platformio.exe run --environment esp32-s3-d
 - Versioning rules are semantic: `feat:` produces a minor release, `fix:` and `perf:` produce patch releases, and `BREAKING CHANGE:` or `!` produces a major release.
 - A successful release run creates a GitHub release tag like `v1.2.3`, updates `CHANGELOG.md`, and publishes board-specific firmware binaries for every supported PlatformIO environment.
 - Published release assets use the form `EspWaveRider-<version>-<environment>.bin` plus a matching `.sha256` checksum file.
+
+## Versioning and firmware sync
+
+- Firmware builds stamp version, build target, and git SHA into the device snapshot and Home Assistant diagnostics.
+- Tagged GitHub releases are the OTA source of truth. Nodes do not relay binaries to each other yet.
+- A node can sync itself to the highest tagged peer release that matches its board target by downloading the matching GitHub release asset.
+- If peers are on local or unknown builds, the dashboard keeps the sync action disabled and reports why no safe candidate is available.
+
+Manual command examples:
+
+```text
+firmware_sync
+firmware_update:v1.0.0
+```
 
 Example commit subjects:
 
