@@ -112,6 +112,19 @@ C:\Users\jd\.platformio\penv\Scripts\platformio.exe run --environment esp32-s3-d
 - Browser-based `e2e/` Playwright coverage exists for live device scenarios, but those tests are hardware-dependent and are not run in CI.
 - GitHub Actions CI builds the supported firmware environments on every push and pull request.
 
+## Releases
+
+- Releases are created automatically from commits on `main` using conventional commit messages.
+- Versioning rules are semantic: `feat:` produces a minor release, `fix:` and `perf:` produce patch releases, and `BREAKING CHANGE:` or `!` produces a major release.
+- A successful release run creates a GitHub release tag like `v1.2.3`, updates `CHANGELOG.md`, and publishes board-specific firmware binaries for every supported PlatformIO environment.
+- Published release assets use the form `EspWaveRider-<version>-<environment>.bin` plus a matching `.sha256` checksum file.
+
+Example commit subjects:
+
+- `feat: add room calibration enrollment workflow`
+- `fix: clamp presence decay to avoid UI flicker`
+- `feat!: rename mqtt observation schema`
+
 ## Repository layout
 
 - `src/main.cpp`: main firmware runtime

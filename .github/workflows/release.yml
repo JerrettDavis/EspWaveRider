@@ -1,0 +1,119 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  semantic-release:
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.semantic.outputs.new_release_published }}
+      version: ${{ steps.semantic.outputs.new_release_version }}
+      git_tag: ${{ steps.semantic.outputs.new_release_git_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create semantic versioned release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          semantic_version: 24
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-release-binaries:
+    needs: semantic-release
+    if: needs.semantic-release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment:
+          - esp32-s3-devkitm-1
+          - esp32dev-uart1
+          - heltec-wifi-lora-32-v3
+          - heltec-wifi-lora-32-v4
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.semantic-release.outputs.git_tag }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-platformio-release-${{ matrix.environment }}-${{ hashFiles('platformio.ini', 'src/**', 'include/**', 'scripts/**') }}
+          restore-keys: |
+            ${{ runner.os }}-platformio-release-${{ matrix.environment }}-
+            ${{ runner.os }}-platformio-release-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ${{ matrix.environment }}
+        run: pio run --environment ${{ matrix.environment }}
+
+      - name: Package release binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.environment }}.bin"
+          sha256sum "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.environment }}.bin" > "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.environment }}.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.environment }}
+          path: dist/*
+
+  publish-release-assets:
+    needs:
+      - semantic-release
+      - build-release-binaries
+    if: needs.semantic-release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Attach board binaries to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.semantic-release.outputs.git_tag }}
+          files: dist/*
