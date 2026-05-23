@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/JerrettDavis/EspWaveRider/compare/v1.0.0...v1.0.1) (2026-05-23)
+
+### Bug Fixes
+
+* add peer version telemetry and OTA firmware sync ([0307718](https://github.com/JerrettDavis/EspWaveRider/commit/0307718ebfef2765c03f20cc617ec491a94433a1))
+* finalize peer version telemetry and OTA firmware sync ([027df90](https://github.com/JerrettDavis/EspWaveRider/commit/027df90d703e489f426d05c4aa64c8e51fc66c28))
+
 ## 1.0.0 (2026-05-23)
 
 ### Features
