@@ -583,6 +583,88 @@
       min-height: 20px;
     }
 
+    .peer-link-list,
+    .calibration-sample-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .peer-link-card,
+    .calibration-sample-card {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .peer-link-top,
+    .calibration-sample-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+
+    .peer-link-name,
+    .calibration-sample-title {
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .peer-link-meta,
+    .calibration-sample-meta {
+      color: var(--muted);
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .peer-link-actions,
+    .calibration-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .peer-link-actions a {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 10px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 700;
+    }
+
+    .peer-link-actions a:hover {
+      border-color: var(--accent);
+    }
+
+    .calibration-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    @media (max-width: 560px) {
+      .calibration-summary-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .calibration-status {
+      color: var(--accent);
+      font-size: 13px;
+      line-height: 1.45;
+      min-height: 20px;
+    }
+
     .sensor-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1041,6 +1123,16 @@
       <div class="hint" id="wifiReasonText">No connection diagnostics received yet.</div>
     </section>
 
+    <section class="span-12" data-view="dashboard sensors">
+      <div class="section-title">
+        <h2>Peer Navigation</h2>
+        <span id="peerLinkSummary">no network peers announced yet</span>
+      </div>
+      <div id="peerLinkList" class="peer-link-list">
+        <div class="hint">Nodes discovered on the LAN will appear here with direct dashboard links.</div>
+      </div>
+    </section>
+
     <section class="span-4" data-view="dashboard">
       <div class="section-title">
         <h2>Presence</h2>
@@ -1087,6 +1179,42 @@
       </div>
       <canvas id="roomFusionCanvas" width="1200" height="520"></canvas>
       <div class="hint">This is now a floor-plan editor. Pick a node in Settings, then drag its marker to move it or drag the white handle to rotate it. The grid and axis guides are for room layout only; peer headings still originate from manual pose data plus live range fusion.</div>
+    </section>
+
+    <section class="span-4" data-view="sensors">
+      <div class="section-title">
+        <h2>Calibration Enrollment</h2>
+        <span>capture one moving target, then refine a peer pose</span>
+      </div>
+
+      <div class="field">
+        <label for="calibrationTargetSelect">Peer Target</label>
+        <select id="calibrationTargetSelect">
+          <option value="">Select a room peer</option>
+        </select>
+      </div>
+
+      <div class="calibration-actions" style="margin-top: 12px;">
+        <button id="calibrationStartButton" type="button">Start Capture</button>
+        <button id="calibrationStopButton" type="button">Stop</button>
+        <button id="calibrationClearButton" type="button">Clear</button>
+        <button id="calibrationLoadButton" type="button">Load Suggestion</button>
+        <button id="calibrationPublishButton" class="primary" type="button">Publish Suggestion</button>
+      </div>
+
+      <div class="hint">Walk or slide one object so both sensors keep seeing a single dominant target. The browser captures paired distance samples and searches for the peer pose correction that minimizes fused-point mismatch.</div>
+      <div id="calibrationStatus" class="calibration-status"></div>
+
+      <div class="calibration-summary-grid" style="margin-top: 12px;">
+        <div class="metric"><div class="label">Captured Samples</div><div id="calibrationSamplesMetric" class="value">0</div></div>
+        <div class="metric"><div class="label">Fit Error</div><div id="calibrationErrorMetric" class="value">—</div></div>
+        <div class="metric"><div class="label">Improvement</div><div id="calibrationImprovementMetric" class="value">—</div></div>
+        <div class="metric"><div class="label">Suggested Pose</div><div id="calibrationSuggestionMetric" class="value">—</div></div>
+      </div>
+
+      <div id="calibrationSampleList" class="calibration-sample-list" style="margin-top: 12px;">
+        <div class="hint">No calibration samples captured yet.</div>
+      </div>
     </section>
 
     <section class="span-4" data-view="dashboard sensors">
@@ -1194,6 +1322,7 @@
     let lastUiSnapshot = null;
     let lastUiEvent = null;
     let latestRoomPeers = [];
+    let latestUdpDiscoveryPeers = [];
     let latestBleBeacons = [];
     let lastRoomEditorTargetOptionsSignature = "";
     let lastWifiNetworkOptionsSignature = "";
@@ -1214,6 +1343,13 @@
       heading: "-90",
       roomWidth: "600",
       roomHeight: "400"
+    };
+    let calibrationSession = {
+      active: false,
+      targetNodeId: "",
+      samples: [],
+      suggestion: null,
+      lastSampleAt: 0
     };
 
     const els = {
@@ -1342,6 +1478,20 @@
       activityCanvas: document.getElementById("activityCanvas"),
       surfaceCanvas: document.getElementById("surfaceCanvas"),
       roomFusionCanvas: document.getElementById("roomFusionCanvas"),
+      peerLinkSummary: document.getElementById("peerLinkSummary"),
+      peerLinkList: document.getElementById("peerLinkList"),
+      calibrationTargetSelect: document.getElementById("calibrationTargetSelect"),
+      calibrationStartButton: document.getElementById("calibrationStartButton"),
+      calibrationStopButton: document.getElementById("calibrationStopButton"),
+      calibrationClearButton: document.getElementById("calibrationClearButton"),
+      calibrationLoadButton: document.getElementById("calibrationLoadButton"),
+      calibrationPublishButton: document.getElementById("calibrationPublishButton"),
+      calibrationStatus: document.getElementById("calibrationStatus"),
+      calibrationSamplesMetric: document.getElementById("calibrationSamplesMetric"),
+      calibrationErrorMetric: document.getElementById("calibrationErrorMetric"),
+      calibrationImprovementMetric: document.getElementById("calibrationImprovementMetric"),
+      calibrationSuggestionMetric: document.getElementById("calibrationSuggestionMetric"),
+      calibrationSampleList: document.getElementById("calibrationSampleList"),
       latestFramePre: document.getElementById("latestFramePre"),
       eventList: document.getElementById("eventList"),
       rawPre: document.getElementById("rawPre")
@@ -1360,6 +1510,432 @@
 
     function setRoomEditorStatus(text) {
       els.roomEditorStatus.textContent = text || "";
+    }
+
+    function setCalibrationStatus(text) {
+      els.calibrationStatus.textContent = text || "";
+    }
+
+    function findUdpDiscoveryPeer(nodeId) {
+      return latestUdpDiscoveryPeers.find(peer => (peer.node_id || "") === nodeId) || null;
+    }
+
+    function normalizeDashboardUrl(hostname, ipAddress) {
+      const trimmedHostname = String(hostname || "").trim();
+      if (trimmedHostname) {
+        const host = trimmedHostname.includes(".") ? trimmedHostname : `${trimmedHostname}.local`;
+        return `http://${host}/`;
+      }
+
+      const trimmedIp = String(ipAddress || "").trim();
+      if (trimmedIp && trimmedIp !== "0.0.0.0") {
+        return `http://${trimmedIp}/`;
+      }
+
+      return "";
+    }
+
+    function hostnameFromNodeId(nodeId) {
+      const normalized = String(nodeId || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      return normalized;
+    }
+
+    function peerNavigationEntries() {
+      const entries = new Map();
+
+      latestRoomPeers.forEach(peer => {
+        const nodeId = String(peer.node_id || "").trim();
+        if (!nodeId) return;
+        entries.set(nodeId, {
+          node_id: nodeId,
+          friendly_name: peer.friendly_name || nodeId,
+          room_id: peer.room_id || lastUiSnapshot?.room_id || "room-default",
+          sensor_role: peer.sensor_role || "peer",
+          hostname: hostnameFromNodeId(nodeId),
+          ip_address: "",
+          age_ms: Number(peer.freshness_ms ?? 0),
+          source: "room"
+        });
+      });
+
+      latestUdpDiscoveryPeers.forEach(peer => {
+        const nodeId = String(peer.node_id || "").trim();
+        if (!nodeId) return;
+        const existing = entries.get(nodeId) || {};
+        entries.set(nodeId, {
+          ...existing,
+          ...peer,
+          node_id: nodeId,
+          hostname: peer.hostname || existing.hostname || hostnameFromNodeId(nodeId),
+          source: "udp"
+        });
+      });
+
+      return Array.from(entries.values());
+    }
+
+    function renderPeerLinks() {
+      const peers = peerNavigationEntries();
+      setTextContentIfChanged(els.peerLinkSummary, peers.length > 0 ? `${peers.length} peer node${peers.length === 1 ? "" : "s"} on the network` : "no network peers announced yet");
+
+      if (peers.length === 0) {
+        els.peerLinkList.innerHTML = "<div class=\"hint\">Nodes discovered on the LAN will appear here with direct dashboard links.</div>";
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+      peers.forEach(peer => {
+        const card = document.createElement("article");
+        card.className = "peer-link-card";
+
+        const top = document.createElement("div");
+        top.className = "peer-link-top";
+
+        const name = document.createElement("div");
+        name.className = "peer-link-name";
+        name.textContent = peer.friendly_name || peer.node_id || "Peer node";
+
+        const meta = document.createElement("div");
+        meta.className = "peer-link-meta";
+        meta.textContent = `${peer.node_id || "unknown"} • ${peer.room_id || "room-default"} • ${peer.sensor_role || "peer"}`;
+
+        top.appendChild(name);
+        top.appendChild(meta);
+
+        const details = document.createElement("div");
+        details.className = "hint";
+  const hostnameLabel = peer.hostname ? `${peer.hostname}.local` : "hostname unavailable";
+        const ipLabel = peer.ip_address || "IP unavailable";
+  const sourceLabel = peer.source === "udp" ? "network discovery" : "room mesh";
+  details.textContent = `${hostnameLabel} • ${ipLabel} • seen ${Math.round(Number(peer.age_ms || 0) / 1000)}s ago • ${sourceLabel}`;
+
+        const actions = document.createElement("div");
+        actions.className = "peer-link-actions";
+
+        const url = normalizeDashboardUrl(peer.hostname, peer.ip_address);
+        if (url) {
+          const openLink = document.createElement("a");
+          openLink.href = url;
+          openLink.target = "_blank";
+          openLink.rel = "noopener noreferrer";
+          openLink.textContent = "Open Dashboard";
+          actions.appendChild(openLink);
+        }
+
+        if (peer.ip_address && peer.ip_address !== "0.0.0.0") {
+          const ipLink = document.createElement("a");
+          ipLink.href = `http://${peer.ip_address}/`;
+          ipLink.target = "_blank";
+          ipLink.rel = "noopener noreferrer";
+          ipLink.textContent = `Open ${peer.ip_address}`;
+          actions.appendChild(ipLink);
+        }
+
+        card.appendChild(top);
+        card.appendChild(details);
+        card.appendChild(actions);
+        fragment.appendChild(card);
+      });
+
+      els.peerLinkList.innerHTML = "";
+      els.peerLinkList.appendChild(fragment);
+    }
+
+    function populateCalibrationTargetOptions() {
+      const previousValue = els.calibrationTargetSelect.value || calibrationSession.targetNodeId || "";
+      const peers = latestRoomPeers
+        .filter(peer => (peer.node_id || "").trim().length > 0)
+        .map(peer => ({
+          value: peer.node_id,
+          label: `${peer.node_id} (${peer.sensor_role || "peer"})`
+        }));
+
+      els.calibrationTargetSelect.innerHTML = "";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = peers.length > 0 ? "Select a room peer" : "No room peers available";
+      els.calibrationTargetSelect.appendChild(placeholder);
+
+      peers.forEach(optionData => {
+        const option = document.createElement("option");
+        option.value = optionData.value;
+        option.textContent = optionData.label;
+        els.calibrationTargetSelect.appendChild(option);
+      });
+
+      els.calibrationTargetSelect.value = peers.some(option => option.value === previousValue) ? previousValue : "";
+      if (calibrationSession.active && calibrationSession.targetNodeId !== els.calibrationTargetSelect.value) {
+        calibrationSession.active = false;
+        calibrationSession.targetNodeId = els.calibrationTargetSelect.value;
+      }
+    }
+
+    function calibrationTargetPeer() {
+      const nodeId = calibrationSession.active ? calibrationSession.targetNodeId : (els.calibrationTargetSelect.value || "");
+      return nodeId ? findRoomPeer(nodeId) : null;
+    }
+
+    function projectCalibrationPoint(poseX, poseY, headingDeg, distanceCm) {
+      const headingRad = Number(headingDeg || 0) * Math.PI / 180;
+      return {
+        x: Number(poseX || 0) + Math.cos(headingRad) * Number(distanceCm || 0),
+        y: Number(poseY || 0) + Math.sin(headingRad) * Number(distanceCm || 0)
+      };
+    }
+
+    function evaluateCalibrationFit(samples, localPose, peerPose) {
+      let totalError = 0;
+      for (const sample of samples) {
+        const localPoint = projectCalibrationPoint(localPose.x, localPose.y, localPose.headingDeg, sample.localDistanceCm);
+        const peerPoint = projectCalibrationPoint(peerPose.x, peerPose.y, peerPose.headingDeg, sample.peerDistanceCm);
+        totalError += Math.hypot(localPoint.x - peerPoint.x, localPoint.y - peerPoint.y);
+      }
+      return samples.length > 0 ? totalError / samples.length : Number.POSITIVE_INFINITY;
+    }
+
+    function computeCalibrationSuggestion(samples, peer) {
+      if (!peer || samples.length < 6 || !lastUiSnapshot) {
+        return null;
+      }
+
+      const localPose = {
+        x: Number(lastUiSnapshot.pose_x_cm ?? 0),
+        y: Number(lastUiSnapshot.pose_y_cm ?? 0),
+        headingDeg: Number(lastUiSnapshot.heading_deg ?? -90)
+      };
+      const basePose = {
+        x: Number(peer.pose_x_cm ?? 0),
+        y: Number(peer.pose_y_cm ?? 0),
+        headingDeg: Number(peer.heading_deg ?? -90)
+      };
+
+      const baselineErrorCm = evaluateCalibrationFit(samples, localPose, basePose);
+      let best = {
+        x: basePose.x,
+        y: basePose.y,
+        headingDeg: basePose.headingDeg,
+        errorCm: baselineErrorCm
+      };
+
+      for (let deltaX = -80; deltaX <= 80; deltaX += 5) {
+        for (let deltaY = -80; deltaY <= 80; deltaY += 5) {
+          for (let deltaHeading = -45; deltaHeading <= 45; deltaHeading += 5) {
+            const candidate = {
+              x: basePose.x + deltaX,
+              y: basePose.y + deltaY,
+              headingDeg: basePose.headingDeg + deltaHeading
+            };
+            const errorCm = evaluateCalibrationFit(samples, localPose, candidate);
+            if (errorCm < best.errorCm) {
+              best = { ...candidate, errorCm };
+            }
+          }
+        }
+      }
+
+      const coarseBest = { ...best };
+      for (let deltaX = -6; deltaX <= 6; deltaX += 1) {
+        for (let deltaY = -6; deltaY <= 6; deltaY += 1) {
+          for (let deltaHeading = -6; deltaHeading <= 6; deltaHeading += 1) {
+            const candidate = {
+              x: coarseBest.x + deltaX,
+              y: coarseBest.y + deltaY,
+              headingDeg: coarseBest.headingDeg + deltaHeading
+            };
+            const errorCm = evaluateCalibrationFit(samples, localPose, candidate);
+            if (errorCm < best.errorCm) {
+              best = { ...candidate, errorCm };
+            }
+          }
+        }
+      }
+
+      return {
+        poseX: Math.round(best.x / 5) * 5,
+        poseY: Math.round(best.y / 5) * 5,
+        headingDeg: Math.round(best.headingDeg / 5) * 5,
+        errorCm: best.errorCm,
+        baselineErrorCm,
+        improvementCm: Math.max(0, baselineErrorCm - best.errorCm)
+      };
+    }
+
+    function renderCalibrationState() {
+      const sampleCount = calibrationSession.samples.length;
+      setTextContentIfChanged(els.calibrationSamplesMetric, String(sampleCount));
+
+      const suggestion = calibrationSession.suggestion;
+      setTextContentIfChanged(els.calibrationErrorMetric, suggestion ? `${Math.round(suggestion.errorCm)} cm` : "—");
+      setTextContentIfChanged(els.calibrationImprovementMetric, suggestion ? `${Math.round(suggestion.improvementCm)} cm` : "—");
+      setTextContentIfChanged(
+        els.calibrationSuggestionMetric,
+        suggestion ? `${suggestion.poseX}, ${suggestion.poseY} @ ${suggestion.headingDeg} deg` : "—"
+      );
+
+      els.calibrationStartButton.disabled = !(els.calibrationTargetSelect.value || calibrationSession.targetNodeId);
+      els.calibrationStopButton.disabled = !calibrationSession.active;
+      els.calibrationClearButton.disabled = sampleCount === 0 && !calibrationSession.active;
+      els.calibrationLoadButton.disabled = !suggestion;
+      els.calibrationPublishButton.disabled = !suggestion;
+
+      const peer = calibrationTargetPeer();
+      if (!calibrationSession.active && sampleCount === 0 && !suggestion) {
+        setCalibrationStatus(peer
+          ? `Ready to capture against ${peer.node_id}. Keep one moving target visible to both sensors.`
+          : "Choose a room peer to begin calibration enrollment.");
+      } else if (calibrationSession.active) {
+        setCalibrationStatus(`Capturing samples for ${calibrationSession.targetNodeId}. Samples only count when both nodes report one clear dominant target.`);
+      } else if (sampleCount > 0 && !suggestion) {
+        setCalibrationStatus(`Captured ${sampleCount} sample${sampleCount === 1 ? "" : "s"} for ${calibrationSession.targetNodeId}. Move the target more and restart capture to refine the fit.`);
+      } else if (suggestion) {
+        setCalibrationStatus(`Suggested pose for ${calibrationSession.targetNodeId}: x ${suggestion.poseX} cm, y ${suggestion.poseY} cm, heading ${suggestion.headingDeg} deg.`);
+      }
+
+      if (sampleCount === 0) {
+        els.calibrationSampleList.innerHTML = "<div class=\"hint\">No calibration samples captured yet.</div>";
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+      calibrationSession.samples.slice(-6).reverse().forEach((sample, index) => {
+        const card = document.createElement("article");
+        card.className = "calibration-sample-card";
+        const top = document.createElement("div");
+        top.className = "calibration-sample-top";
+
+        const title = document.createElement("div");
+        title.className = "calibration-sample-title";
+        title.textContent = `Sample ${sampleCount - index}`;
+
+        const meta = document.createElement("div");
+        meta.className = "calibration-sample-meta";
+        meta.textContent = `${Math.round(sample.timestampMs / 100) / 10}s`;
+
+        top.appendChild(title);
+        top.appendChild(meta);
+
+        const body = document.createElement("div");
+        body.className = "hint";
+        body.textContent = `Local ${Math.round(sample.localDistanceCm)} cm • Peer ${Math.round(sample.peerDistanceCm)} cm • freshness ${Math.round(sample.peerFreshnessMs)} ms`;
+
+        card.appendChild(top);
+        card.appendChild(body);
+        fragment.appendChild(card);
+      });
+
+      els.calibrationSampleList.innerHTML = "";
+      els.calibrationSampleList.appendChild(fragment);
+    }
+
+    function captureCalibrationSample() {
+      if (!calibrationSession.active) {
+        return;
+      }
+
+      const peer = findRoomPeer(calibrationSession.targetNodeId);
+      const localDistanceCm = Number(lastUiEvent?.dominant_gate_distance_cm ?? lastUiSnapshot?.dominant_gate_distance_cm ?? -1);
+      const peerDistanceCm = Number(peer?.dominant_gate_distance_cm ?? -1);
+      const localCandidate = (lastUiEvent?.detection_candidate ?? lastUiSnapshot?.detection_candidate) === true;
+      const peerCandidate = peer?.detection_candidate === true;
+      const localPeople = Number(lastUiEvent?.people_estimate ?? lastUiSnapshot?.people_estimate ?? 0);
+      const peerPeople = Number(peer?.people_estimate ?? 0);
+      const peerFreshnessMs = Number(peer?.freshness_ms ?? Number.POSITIVE_INFINITY);
+      const nowMs = performance.now();
+
+      if (!peer || !localCandidate || !peerCandidate || localDistanceCm < 0 || peerDistanceCm < 0 || localPeople > 1 || peerPeople > 1 || peerFreshnessMs > 2500) {
+        renderCalibrationState();
+        return;
+      }
+
+      const previousSample = calibrationSession.samples.length > 0 ? calibrationSession.samples[calibrationSession.samples.length - 1] : null;
+      const localMoved = !previousSample || Math.abs(localDistanceCm - previousSample.localDistanceCm) >= 8;
+      const peerMoved = !previousSample || Math.abs(peerDistanceCm - previousSample.peerDistanceCm) >= 8;
+      if (!localMoved && !peerMoved) {
+        return;
+      }
+
+      if (previousSample && (nowMs - calibrationSession.lastSampleAt) < 220) {
+        return;
+      }
+
+      calibrationSession.samples.push({
+        timestampMs: nowMs,
+        localDistanceCm,
+        peerDistanceCm,
+        peerFreshnessMs
+      });
+      if (calibrationSession.samples.length > 80) {
+        calibrationSession.samples.shift();
+      }
+
+      calibrationSession.lastSampleAt = nowMs;
+      calibrationSession.suggestion = computeCalibrationSuggestion(calibrationSession.samples, peer);
+      renderCalibrationState();
+    }
+
+    function startCalibrationCapture() {
+      const nodeId = els.calibrationTargetSelect.value;
+      if (!nodeId) {
+        setCalibrationStatus("Choose a room peer before starting calibration capture.");
+        return;
+      }
+
+      calibrationSession = {
+        active: true,
+        targetNodeId: nodeId,
+        samples: [],
+        suggestion: null,
+        lastSampleAt: 0
+      };
+      renderCalibrationState();
+    }
+
+    function stopCalibrationCapture() {
+      calibrationSession.active = false;
+      renderCalibrationState();
+    }
+
+    function clearCalibrationCapture() {
+      calibrationSession = {
+        active: false,
+        targetNodeId: els.calibrationTargetSelect.value || "",
+        samples: [],
+        suggestion: null,
+        lastSampleAt: 0
+      };
+      renderCalibrationState();
+    }
+
+    function loadCalibrationSuggestion() {
+      const suggestion = calibrationSession.suggestion;
+      if (!suggestion || !calibrationSession.targetNodeId) {
+        return;
+      }
+
+      els.roomEditorTargetInput.value = calibrationSession.targetNodeId;
+      setDisplayedRoomConfig({
+        roomId: calibrationTargetPeer()?.room_id || els.roomIdInput.value || "room-default",
+        sensorRole: calibrationTargetPeer()?.sensor_role || els.sensorRoleInput.value || "peer",
+        poseX: String(suggestion.poseX),
+        poseY: String(suggestion.poseY),
+        heading: String(suggestion.headingDeg),
+        roomWidth: String(calibrationTargetPeer()?.room_width_cm ?? els.roomWidthInput.value ?? 600),
+        roomHeight: String(calibrationTargetPeer()?.room_height_cm ?? els.roomHeightInput.value ?? 400)
+      });
+      persistSetupFormState();
+      setRoomEditorStatus(`Loaded calibration suggestion for ${editorTargetLabel(calibrationSession.targetNodeId)}.`);
+      setCalibrationStatus(`Loaded suggested pose for ${calibrationSession.targetNodeId} into the room editor.`);
+    }
+
+    async function publishCalibrationSuggestion() {
+      loadCalibrationSuggestion();
+      await saveRoomPoseConfig();
+      calibrationSession.active = false;
+      renderCalibrationState();
     }
 
     function shouldPreserveSelectedRoomDraft() {
@@ -1915,8 +2491,11 @@
 
       lastUiSnapshot = snapshot;
       latestRoomPeers = Array.isArray(snapshot.room_peers) ? snapshot.room_peers : [];
+      latestUdpDiscoveryPeers = Array.isArray(snapshot.udp_discovery?.peers) ? snapshot.udp_discovery.peers : [];
       latestBleBeacons = Array.isArray(snapshot.ble_beacons) ? snapshot.ble_beacons : [];
       populateRoomEditorTargetOptions();
+      populateCalibrationTargetOptions();
+      renderPeerLinks();
 
       applyHaConfig(snapshot);
       if (!shouldPreserveSelectedRoomDraft()) {
@@ -1961,6 +2540,8 @@
         const hostLabel = snapshot.device_hostname ? `${snapshot.device_hostname}.local` : window.location.host;
         setConnectionState("connected", `${deviceSocketLive ? "Live WebSocket" : "Device HTTP"} @ ${hostLabel}`);
       }
+
+      captureCalibrationSample();
     }
 
     async function fetchDeviceSnapshot() {
@@ -2652,7 +3233,11 @@
       if (typeof event.room_activity_score === "number") setTextContentIfChanged(els.roomActivityMetric, String(event.room_activity_score));
       if (typeof event.ble_beacon_count === "number") setTextContentIfChanged(els.bleBeaconCountMetric, String(event.ble_beacon_count));
       if (Array.isArray(event.room_peers)) latestRoomPeers = event.room_peers;
+      if (Array.isArray(event.udp_discovery?.peers)) latestUdpDiscoveryPeers = event.udp_discovery.peers;
       if (Array.isArray(event.ble_beacons)) latestBleBeacons = event.ble_beacons;
+
+      populateCalibrationTargetOptions();
+      renderPeerLinks();
 
       if (typeof event.status_led_hex === "string" && event.status_led_hex.length === 6) {
         els.statusLedSwatch.style.background = `#${event.status_led_hex}`;
@@ -2676,6 +3261,7 @@
       }
 
       drawRoomFusionView();
+      captureCalibrationSample();
     }
 
     function hexToBytes(hex) {
@@ -3454,7 +4040,15 @@
       lastPresenceValue = undefined;
       lastMode = "waiting";
       latestRoomPeers = [];
+      latestUdpDiscoveryPeers = [];
       latestBleBeacons = [];
+      calibrationSession = {
+        active: false,
+        targetNodeId: "",
+        samples: [],
+        suggestion: null,
+        lastSampleAt: 0
+      };
       localRoomConfigDraft = {
         roomId: "room-default",
         sensorRole: "auto",
@@ -3506,6 +4100,9 @@
       els.bleBeaconCountMetric.textContent = "0";
       els.bleBeaconList.textContent = "No BLE beacons seen yet.";
       populateRoomEditorTargetOptions();
+      populateCalibrationTargetOptions();
+      renderPeerLinks();
+      renderCalibrationState();
       setRoomEditorStatus("");
       els.statusLedSwatch.style.background = "#000000";
       els.statusLedText.textContent = "—";
@@ -3649,6 +4246,15 @@
     els.saveTuningButton.addEventListener("click", () => saveAdvancedSettings().catch(error => addEvent({ event: "write_error", ms: performance.now(), error: String(error) })));
     els.addToHaButton.addEventListener("click", () => oneClickAddToHomeAssistant().catch(error => addEvent({ event: "write_error", ms: performance.now(), error: String(error) })));
     els.openMosquittoButton.addEventListener("click", () => openMosquittoSetup());
+    els.calibrationTargetSelect.addEventListener("change", () => {
+      calibrationSession.targetNodeId = els.calibrationTargetSelect.value || "";
+      renderCalibrationState();
+    });
+    els.calibrationStartButton.addEventListener("click", () => startCalibrationCapture());
+    els.calibrationStopButton.addEventListener("click", () => stopCalibrationCapture());
+    els.calibrationClearButton.addEventListener("click", () => clearCalibrationCapture());
+    els.calibrationLoadButton.addEventListener("click", () => loadCalibrationSuggestion());
+    els.calibrationPublishButton.addEventListener("click", () => publishCalibrationSuggestion().catch(error => addEvent({ event: "write_error", ms: performance.now(), error: String(error) })));
     els.roomEditorTargetInput.addEventListener("change", () => {
       applySelectedRoomEditorTarget();
       persistSetupFormState();

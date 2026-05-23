@@ -5,15 +5,19 @@
 #include <PubSubClient.h>
 #include <NimBLEDevice.h>
 #include <WebServer.h>
-#include <WebSocketsClient.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <Adafruit_NeoPixel.h>
 
 #include "board_profile.h"
+#include "ble_support.h"
+#include "device_web.h"
 #include "generated_visualizer_page.h"
 #include "ha_config.h"
+#include "runtime_support.h"
+#include "string_utils.h"
+#include "websocket_mqtt_client.h"
 
 // =====================================================
 // Lonely Binary ESP32-S3 + HLK-LD2420 telemetry firmware
@@ -49,9 +53,6 @@ static constexpr uint32_t RADAR_IDLE_FRAME_GAP_MS = 20;
 static constexpr size_t RADAR_FRAME_BUFFER_SIZE = 256;
 static constexpr uint32_t WIFI_RETRY_MS = 10000;
 static constexpr uint32_t MQTT_RETRY_MS = 5000;
-static constexpr uint32_t MQTT_WS_CONNECT_TIMEOUT_MS = 5000;
-static constexpr size_t MQTT_WS_RX_BUFFER_SIZE = 2048;
-static constexpr size_t MQTT_WS_TX_BUFFER_SIZE = 1024;
 static constexpr byte AP_DNS_PORT = 53;
 static constexpr uint16_t DEVICE_HTTP_PORT = 80;
 static constexpr uint16_t DEVICE_WS_PORT = 81;
@@ -81,235 +82,15 @@ static constexpr int8_t ROOM_ANGLE_SCORE_LIMIT = 12;
 static constexpr int STATUS_RGB_LED_PIN = kBoardProfile.statusRgbLedPin;
 static constexpr uint8_t STATUS_RGB_LED_COUNT = kBoardProfile.statusRgbLedCount;
 static constexpr uint8_t DEFAULT_LED_BRIGHTNESS = 32;
-static constexpr uint8_t MAX_BLE_SIGHTINGS = 16;
-static constexpr uint8_t MAX_BLE_TAGS = 8;
-static constexpr uint32_t BLE_SIGHTING_FRESHNESS_MS = 30000;
-static constexpr uint32_t BLE_TAG_FRESHNESS_MS = 45000;
-static constexpr uint32_t BLE_SCAN_WINDOW_MS = 0;
-static constexpr int BLE_TAG_DEFAULT_MIN_RSSI = -88;
+static constexpr uint16_t DEFAULT_PRESENCE_HOLD_MS = 4000;
+static constexpr uint16_t MIN_PRESENCE_HOLD_MS = 3000;
+static constexpr uint16_t MAX_PRESENCE_HOLD_MS = 60000;
 static constexpr uint32_t ROOM_SUMMARY_KEEPALIVE_MS = 10000;
 static constexpr uint16_t ROOM_SUMMARY_DISTANCE_DELTA_CM = 35;
 static constexpr uint8_t ROOM_SUMMARY_ACTIVITY_DELTA = 6;
 
 static constexpr uint8_t ENERGY_HEADER[] = {0xF4, 0xF3, 0xF2, 0xF1};
 static constexpr uint8_t ENERGY_FOOTER[] = {0xF8, 0xF7, 0xF6, 0xF5};
-
-class WebSocketMqttClient : public Client {
- public:
-  WebSocketMqttClient() {
-    webSocketClient.onEvent([this](WStype_t type, uint8_t* payload, size_t length) {
-      handleEvent(type, payload, length);
-    });
-    webSocketClient.setReconnectInterval(0);
-  }
-
-  void configure(const String& host, uint16_t port, const String& path, const String& hostHeader) {
-    configuredHost = host;
-    configuredPort = port;
-    configuredPath = path.length() > 0 ? path : "/mqtt";
-    configuredHostHeader = hostHeader;
-  }
-
-  void loop() {
-    flush();
-    webSocketClient.loop();
-  }
-
-  int connect(IPAddress ip, uint16_t port) override {
-    return connect(ip.toString().c_str(), port);
-  }
-
-  int connect(const char* host, uint16_t port) override {
-    stop();
-
-    configuredHost = host != nullptr ? String(host) : configuredHost;
-    configuredPort = port;
-    connectFailed = false;
-    socketConnected = false;
-
-    extraHeaders = "";
-    if (configuredHostHeader.length() > 0) {
-      extraHeaders = String("Host: ") + configuredHostHeader + "\r\n";
-      webSocketClient.setExtraHeaders(extraHeaders.c_str());
-    } else {
-      webSocketClient.setExtraHeaders(nullptr);
-    }
-
-    webSocketClient.begin(configuredHost.c_str(), configuredPort, configuredPath.c_str(), "mqtt");
-
-    uint32_t startedAt = millis();
-    while (!socketConnected && !connectFailed && (millis() - startedAt) < MQTT_WS_CONNECT_TIMEOUT_MS) {
-      webSocketClient.loop();
-      delay(10);
-    }
-
-    return socketConnected ? 1 : 0;
-  }
-
-  size_t write(uint8_t value) override {
-    if (txLength >= sizeof(txBuffer)) {
-      if (!flushPendingFrame()) {
-        return 0;
-      }
-    }
-
-    txBuffer[txLength++] = value;
-    return 1;
-  }
-
-  size_t write(const uint8_t* buffer, size_t size) override {
-    if (buffer == nullptr || size == 0) {
-      return 0;
-    }
-
-    if (txLength > 0 && (txLength + size) <= sizeof(txBuffer)) {
-      memcpy(txBuffer + txLength, buffer, size);
-      txLength += size;
-      return size;
-    }
-
-    if (txLength > 0 && !flushPendingFrame()) {
-      return 0;
-    }
-
-    if (size <= sizeof(txBuffer)) {
-      memcpy(txBuffer, buffer, size);
-      txLength = size;
-      return size;
-    }
-
-    return webSocketClient.sendBIN(buffer, size) ? size : 0;
-  }
-
-  int available() override {
-    flush();
-    webSocketClient.loop();
-    return static_cast<int>(rxLength);
-  }
-
-  int read() override {
-    uint8_t value = 0;
-    return read(&value, 1) == 1 ? value : -1;
-  }
-
-  int read(uint8_t* buffer, size_t size) override {
-    if (buffer == nullptr || size == 0 || rxLength == 0) {
-      return 0;
-    }
-
-    size_t bytesToCopy = rxLength < size ? rxLength : size;
-    memcpy(buffer, rxBuffer, bytesToCopy);
-    rxLength -= bytesToCopy;
-
-    if (rxLength > 0) {
-      memmove(rxBuffer, rxBuffer + bytesToCopy, rxLength);
-    }
-
-    return static_cast<int>(bytesToCopy);
-  }
-
-  int peek() override {
-    return rxLength > 0 ? rxBuffer[0] : -1;
-  }
-
-  void flush() override {
-    flushPendingFrame();
-  }
-
-  void stop() override {
-    txLength = 0;
-    rxLength = 0;
-    socketConnected = false;
-    connectFailed = false;
-    webSocketClient.disconnect();
-  }
-
-  uint8_t connected() override {
-    return socketConnected ? 1 : 0;
-  }
-
-  operator bool() override {
-    return connected() != 0;
-  }
-
- private:
-  void handleEvent(WStype_t type, uint8_t* payload, size_t length) {
-    switch (type) {
-      case WStype_CONNECTED:
-        socketConnected = true;
-        connectFailed = false;
-        break;
-      case WStype_BIN:
-        appendRx(payload, length);
-        break;
-      case WStype_DISCONNECTED:
-        socketConnected = false;
-        connectFailed = true;
-        break;
-      case WStype_ERROR:
-        socketConnected = false;
-        connectFailed = true;
-        break;
-      default:
-        break;
-    }
-  }
-
-  void appendRx(const uint8_t* payload, size_t length) {
-    if (payload == nullptr || length == 0) {
-      return;
-    }
-
-    size_t bytesToCopy = length;
-    if (bytesToCopy > sizeof(rxBuffer)) {
-      payload += (bytesToCopy - sizeof(rxBuffer));
-      bytesToCopy = sizeof(rxBuffer);
-    }
-
-    if ((rxLength + bytesToCopy) > sizeof(rxBuffer)) {
-      size_t overflow = (rxLength + bytesToCopy) - sizeof(rxBuffer);
-      if (overflow >= rxLength) {
-        rxLength = 0;
-      } else {
-        memmove(rxBuffer, rxBuffer + overflow, rxLength - overflow);
-        rxLength -= overflow;
-      }
-    }
-
-    memcpy(rxBuffer + rxLength, payload, bytesToCopy);
-    rxLength += bytesToCopy;
-  }
-
-  bool flushPendingFrame() {
-    if (txLength == 0) {
-      return true;
-    }
-
-    if (!socketConnected) {
-      return false;
-    }
-
-    bool sent = webSocketClient.sendBIN(txBuffer, txLength);
-    if (sent) {
-      txLength = 0;
-    }
-
-    return sent;
-  }
-
-  WebSocketsClient webSocketClient;
-  String configuredHost;
-  uint16_t configuredPort = 80;
-  String configuredPath = "/mqtt";
-  String configuredHostHeader;
-  String extraHeaders;
-  bool socketConnected = false;
-  bool connectFailed = false;
-  uint8_t rxBuffer[MQTT_WS_RX_BUFFER_SIZE] = {0};
-  size_t rxLength = 0;
-  uint8_t txBuffer[MQTT_WS_TX_BUFFER_SIZE] = {0};
-  size_t txLength = 0;
-};
 
 HardwareSerial RadarSerial(kBoardProfile.radarSerialPort);
 WiFiClient HomeAssistantWiFiClient;
@@ -392,24 +173,6 @@ struct LatestGenericFrameSnapshot {
   String ascii;
 };
 
-struct BleBeaconSighting {
-  bool occupied = false;
-  String address;
-  String name;
-  String serviceUuid;
-  int rssi = -127;
-  uint32_t lastSeenMs = 0;
-};
-
-struct BleIdentityTag {
-  bool occupied = false;
-  String label;
-  String address;
-  int minRssi = BLE_TAG_DEFAULT_MIN_RSSI;
-  int lastRssi = -127;
-  uint32_t lastSeenMs = 0;
-};
-
 struct RuntimeHomeAssistantConfig {
   bool enabled = false;
   String wifiSsid;
@@ -433,7 +196,7 @@ struct RuntimeHomeAssistantConfig {
   uint16_t maxDetectionRangeCm = LD2420_GATE_COUNT * LD2420_GATE_SIZE_CM;
   uint16_t minGateEnergy = LD2420_ACTIVE_GATE_FLOOR;
   uint8_t sensitivityPercent = 55;
-  uint16_t presenceHoldMs = 4000;
+  uint16_t presenceHoldMs = DEFAULT_PRESENCE_HOLD_MS;
   uint8_t minActiveGates = 1;
   uint8_t minActivityScore = 10;
   bool ledEnabled = true;
@@ -508,7 +271,6 @@ bool detectionCandidateActive = false;
 bool presenceInitialized = false;
 bool homeAssistantDiscoveryPublished = false;
 int lastLocalDominantGateDistanceCm = -1;
-NimBLEScan* bleScanner = nullptr;
 PublishedRoomSummaryState lastPublishedRoomSummary;
 
 uint8_t radarBuffer[RADAR_FRAME_BUFFER_SIZE];
@@ -543,16 +305,6 @@ String usbCommandBuffer;
 uint32_t lastWiFiScanMs = 0;
 uint32_t wifiScansTotal = 0;
 uint32_t lastUdpDiscoveryAnnounceMs = 0;
-
-void updateBleSighting(NimBLEAdvertisedDevice* advertisedDevice);
-
-class BleScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
-  void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
-    updateBleSighting(advertisedDevice);
-  }
-};
-
-BleScanCallbacks bleScanCallbacks;
 
 // -----------------------------------------------------
 // Forward declarations
@@ -595,19 +347,15 @@ void announceUdpDiscovery(bool emitEvent);
 bool homeAssistantConfigured();
 String sanitizeHostname(const String& value);
 String deviceHostname();
+String deviceHostnameLabel();
+String deviceDashboardUrl();
 String accessPointSsid();
 String accessPointPassword();
-String buildHexString(const uint8_t* data, size_t length);
 void ensureAccessPointActive();
 void ensureMdnsActive();
-void ensureDeviceWebServerActive();
-void ensureDeviceWebSocketActive();
-void handleDeviceWebServer();
-void handleHttpCommand();
 String buildDeviceSnapshotJson(int32_t energySince = -1,
                                int32_t textSince = -1,
                                int32_t genericSince = -1);
-void broadcastDeviceSnapshot();
 String defaultRoomId();
 String defaultSensorRole();
 String roomTopicRoot();
@@ -615,9 +363,6 @@ String roomNodeSummaryTopic(const String& nodeId);
 String roomSummarySubscriptionTopic();
 String roomPoseCommandTopic(const String& nodeId);
 String roomPoseCommandSubscriptionTopic();
-String jsonFieldString(const String& json, const char* fieldName);
-int jsonFieldInt(const String& json, const char* fieldName, int fallbackValue);
-bool jsonFieldBool(const String& json, const char* fieldName, bool fallbackValue);
 void handleRoomSummaryMessage(const String& topic, const String& payload);
 void applyRoomPoseConfig(const String& roomId,
                          const String& sensorRole,
@@ -640,22 +385,11 @@ bool publishRoomPoseCommand(const String& nodeId,
                             uint16_t roomHeightCm);
 void updateRoomPeerAngleHint(RoomPeerSummary& peer, int localDominantGateDistanceCm, int peerDominantGateDistanceCm);
 void appendRoomPeersJson(String& json, int localDominantGateDistanceCm);
-void appendBleSightingsJson(String& json);
-void appendBleTagsJson(String& json);
 void appendUdpDiscoveryPeersJson(String& json);
-void initializeBleScanner();
-void ensureBleScannerActive();
-void updateBleSighting(NimBLEAdvertisedDevice* advertisedDevice);
-uint8_t activeBleSightingCount();
-uint8_t activeBleTagCount();
-void publishBleStates();
 void handleMqttMessage(char* topic, uint8_t* payload, unsigned int length);
 bool subscribeRoomTopics();
 void publishRoomCollaborationSummary();
 RoomAggregateMetrics buildRoomAggregateMetrics();
-String normalizeBleIdentityValue(const String& value);
-void clearBleIdentityTag(uint8_t slot);
-bool bleIdentityTagPresent(const BleIdentityTag& tag, uint32_t now);
 bool mqttEndpointUsesWebSockets(const String& mqttHost);
 bool mqttEndpointUsesSecureWebSockets(const String& mqttHost);
 String normalizeWebSocketPath(const String& path);
@@ -667,9 +401,6 @@ String homeAssistantDeviceTopic();
 String homeAssistantDiscoveryTopic(const char* component, const char* objectId);
 String homeAssistantStateTopic(const char* objectId);
 String homeAssistantObservationTopic();
-String jsonEscape(const String& value);
-String percentDecode(const String& value);
-bool splitConfigFields(const String& payload, String* fields, size_t expectedFieldCount);
 void ensureWiFiConnected();
 void ensureMqttConnected();
 void publishHomeAssistantAvailability(bool online);
@@ -684,6 +415,7 @@ RadarDerivedMetrics buildRadarDerivedMetrics();
 uint16_t effectiveMinGateEnergy();
 uint8_t effectiveMinActivityScore();
 bool radarDetectionCandidate(const RadarDerivedMetrics& metrics);
+uint16_t effectivePresenceHoldMs();
 uint32_t presenceDecayRemainingMs(uint32_t now);
 void updateStatusRgbLed(uint32_t now);
 uint32_t statusLedColorForState(uint32_t now);
@@ -702,44 +434,6 @@ const char* describeWiFiDisconnectReason(uint8_t reason);
 const char* describeMqttState(int state);
 void handleWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 
-bool mqttEndpointUsesWebSockets(const String& mqttHost) {
-  return mqttHost.startsWith("ws://") ||
-         mqttHost.startsWith("wss://") ||
-         mqttHost.startsWith("http://") ||
-         mqttHost.startsWith("https://");
-}
-
-bool mqttEndpointUsesSecureWebSockets(const String& mqttHost) {
-  return mqttHost.startsWith("wss://") || mqttHost.startsWith("https://");
-}
-
-String normalizeWebSocketPath(const String& path) {
-  if (path.length() == 0) {
-    return String(HomeAssistantConfig::kMqttWebSocketPath);
-  }
-
-  return path[0] == '/' ? path : String("/") + path;
-}
-
-String stripUrlScheme(const String& value, const char* scheme) {
-  return value.startsWith(scheme) ? value.substring(strlen(scheme)) : value;
-}
-
-bool isIpv4AddressLiteral(const String& value) {
-  if (value.length() == 0) {
-    return false;
-  }
-
-  for (size_t i = 0; i < value.length(); i++) {
-    char c = value[i];
-    if ((c < '0' || c > '9') && c != '.') {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 void serviceMqttTransport() {
   if (runtimeConfig.mqttUseWebSockets || mqttEndpointUsesWebSockets(runtimeConfig.mqttHost)) {
     HomeAssistantWebSocketClient.loop();
@@ -757,80 +451,26 @@ void configureMqttTransport(bool useWebSockets, const String& mqttHost, uint16_t
   HomeAssistantMqttClient.setClient(HomeAssistantWiFiClient);
 }
 
-bool hasValue(const char* value) {
-  return value != nullptr && value[0] != '\0';
-}
-
-String deviceIdentitySuffix() {
-  uint64_t chipMac = ESP.getEfuseMac();
-  char suffix[7];
-  snprintf(suffix, sizeof(suffix), "%06llx", chipMac & 0xFFFFFFULL);
-  return String(suffix);
-}
-
-String defaultNodeId() {
-  return String(HomeAssistantConfig::kNodeId) + "_" + deviceIdentitySuffix();
-}
-
-String defaultFriendlyName() {
-  return String(HomeAssistantConfig::kFriendlyName) + " " + deviceIdentitySuffix();
-}
-
-String defaultRoomId() {
-  return "room-default";
-}
-
-String defaultSensorRole() {
-  return "auto";
-}
-
-bool usesFactoryDefaultIdentity(const String& value, const char* factoryDefault) {
-  return value.length() == 0 || value == factoryDefault;
-}
-
-String sanitizeHostname(const String& value) {
-  String hostname;
-  hostname.reserve(value.length());
-
-  for (size_t i = 0; i < value.length(); i++) {
-    char c = value[i];
-
-    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-      hostname += c;
-      continue;
-    }
-
-    if (c >= 'A' && c <= 'Z') {
-      hostname += static_cast<char>(c - 'A' + 'a');
-      continue;
-    }
-
-    if ((c == '-' || c == '_') && hostname.length() > 0 && hostname[hostname.length() - 1] != '-') {
-      hostname += '-';
-    }
-  }
-
-  while (hostname.startsWith("-")) {
-    hostname.remove(0, 1);
-  }
-  while (hostname.endsWith("-")) {
-    hostname.remove(hostname.length() - 1, 1);
-  }
-
-  if (hostname.length() == 0) {
-    hostname = "lb-mmwave";
-  }
-
-  if (hostname.length() > 31) {
-    hostname.remove(31);
-  }
-
-  return hostname;
-}
-
 String deviceHostname() {
   String candidate = runtimeConfig.nodeId.length() > 0 ? runtimeConfig.nodeId : String(HomeAssistantConfig::kNodeId);
   return sanitizeHostname(candidate);
+}
+
+String deviceHostnameLabel() {
+  return deviceHostname() + ".local";
+}
+
+String deviceDashboardUrl() {
+  const String hostnameLabel = deviceHostnameLabel();
+  if (hostnameLabel.length() > 0) {
+    return "http://" + hostnameLabel + "/";
+  }
+
+  if (lastKnownIpAddress.length() > 0 && lastKnownIpAddress != "0.0.0.0") {
+    return "http://" + lastKnownIpAddress + "/";
+  }
+
+  return String("http://0.0.0.0/");
 }
 
 String accessPointSsid() {
@@ -846,19 +486,6 @@ String accessPointPassword() {
   char password[16];
   snprintf(password, sizeof(password), "lbmmw%06llx", chipMac & 0xFFFFFFULL);
   return String(password);
-}
-
-String buildHexString(const uint8_t* data, size_t length) {
-  String hex;
-  hex.reserve(length * 2);
-
-  for (size_t i = 0; i < length; i++) {
-    char buffer[3];
-    snprintf(buffer, sizeof(buffer), "%02X", data[i]);
-    hex += buffer;
-  }
-
-  return hex;
 }
 
 void ensureAccessPointActive() {
@@ -981,6 +608,7 @@ String buildDeviceSnapshotJson(int32_t energySince,
   json += ",\"mqtt_host_ip\":\"" + jsonEscape(lastResolvedMqttHost) + "\"";
   json += ",\"topic_prefix\":\"" + jsonEscape(homeAssistantDeviceTopic()) + "\"";
   json += ",\"device_hostname\":\"" + jsonEscape(deviceHostname()) + "\"";
+  json += ",\"dashboard_url\":\"" + jsonEscape(deviceDashboardUrl()) + "\"";
   json += ",\"ap_ssid\":\"" + jsonEscape(lastSoftApSsid) + "\"";
   json += ",\"ap_password\":\"" + jsonEscape(lastSoftApPassword) + "\"";
   json += ",\"ap_ip\":\"" + jsonEscape(lastSoftApIpAddress) + "\"";
@@ -1011,6 +639,7 @@ String buildDeviceSnapshotJson(int32_t energySince,
   json += ",\"room_active_nodes\":" + String(roomMetrics.activeNodeCount);
   json += ",\"room_peer_nodes\":" + String(roomMetrics.peerNodeCount);
   json += ",\"room_activity_score\":" + String(roomMetrics.activityScore);
+  appendUdpDiscoveryPeersJson(json);
   appendRoomPeersJson(json, metrics.dominantGateDistanceCm);
   appendBleSightingsJson(json);
   appendBleTagsJson(json);
@@ -1068,81 +697,6 @@ String buildDeviceSnapshotJson(int32_t energySince,
 
   json += "}";
   return json;
-}
-
-void handleHttpCommand() {
-  String command = DeviceWebServer.arg("plain");
-  command.trim();
-  if (command.length() > 0) {
-    handleUsbCommand(command);
-  }
-  DeviceWebServer.send(200, "application/json", buildDeviceSnapshotJson());
-}
-
-void broadcastDeviceSnapshot() {
-  if (!webSocketServerStarted) {
-    return;
-  }
-
-  String payload = buildDeviceSnapshotJson();
-  DeviceWebSocket.broadcastTXT(payload);
-}
-
-void ensureDeviceWebSocketActive() {
-  if (webSocketServerStarted) {
-    return;
-  }
-
-  DeviceWebSocket.begin();
-  DeviceWebSocket.onEvent([](uint8_t clientId, WStype_t type, uint8_t* payload, size_t length) {
-    (void)payload;
-    (void)length;
-
-    if (type == WStype_CONNECTED) {
-      String payload = buildDeviceSnapshotJson();
-      DeviceWebSocket.sendTXT(clientId, payload);
-    }
-  });
-
-  webSocketServerStarted = true;
-}
-
-void ensureDeviceWebServerActive() {
-  if (webServerStarted) {
-    return;
-  }
-
-  DeviceWebServer.on("/", HTTP_GET, []() {
-    DeviceWebServer.send_P(200, "text/html; charset=utf-8", kEmbeddedVisualizerPage);
-  });
-  DeviceWebServer.on("/api/snapshot", HTTP_GET, []() {
-    int32_t energySince = DeviceWebServer.hasArg("energy_since") ? DeviceWebServer.arg("energy_since").toInt() : -1;
-    int32_t textSince = DeviceWebServer.hasArg("text_since") ? DeviceWebServer.arg("text_since").toInt() : -1;
-    int32_t genericSince = DeviceWebServer.hasArg("generic_since") ? DeviceWebServer.arg("generic_since").toInt() : -1;
-    DeviceWebServer.send(200, "application/json", buildDeviceSnapshotJson(energySince, textSince, genericSince));
-  });
-  DeviceWebServer.on("/api/command", HTTP_POST, handleHttpCommand);
-  DeviceWebServer.onNotFound([]() {
-    DeviceWebServer.sendHeader("Location", "/");
-    DeviceWebServer.send(302, "text/plain", "Redirecting");
-  });
-
-  DeviceWebServer.begin();
-  webServerStarted = true;
-}
-
-void handleDeviceWebServer() {
-  if (dnsServerStarted) {
-    DeviceDnsServer.processNextRequest();
-  }
-
-  if (webServerStarted) {
-    DeviceWebServer.handleClient();
-  }
-
-  if (webSocketServerStarted) {
-    DeviceWebSocket.loop();
-  }
 }
 
 const char* describeWiFiDisconnectReason(uint8_t reason) {
@@ -1263,7 +817,9 @@ void loadHomeAssistantConfig() {
   runtimeConfig.maxDetectionRangeCm = SettingsStore.getUShort("max_range", LD2420_GATE_COUNT * LD2420_GATE_SIZE_CM);
   runtimeConfig.minGateEnergy = SettingsStore.getUShort("min_energy", LD2420_ACTIVE_GATE_FLOOR);
   runtimeConfig.sensitivityPercent = SettingsStore.getUChar("sense_pct", 55);
-  runtimeConfig.presenceHoldMs = SettingsStore.getUShort("hold_ms", 4000);
+  runtimeConfig.presenceHoldMs = static_cast<uint16_t>(constrain(SettingsStore.getUShort("hold_ms", DEFAULT_PRESENCE_HOLD_MS),
+                                                                MIN_PRESENCE_HOLD_MS,
+                                                                MAX_PRESENCE_HOLD_MS));
   runtimeConfig.minActiveGates = SettingsStore.getUChar("min_gates", 1);
   runtimeConfig.minActivityScore = SettingsStore.getUChar("min_act", 10);
   runtimeConfig.ledEnabled = SettingsStore.getBool("led_on", true);
@@ -1727,121 +1283,6 @@ void appendRoomPeersJson(String& json, int localDominantGateDistanceCm) {
   json += "]";
 }
 
-uint8_t activeBleSightingCount() {
-  uint32_t now = millis();
-  uint8_t count = 0;
-  for (uint8_t i = 0; i < MAX_BLE_SIGHTINGS; i++) {
-    if (bleSightings[i].occupied && (now - bleSightings[i].lastSeenMs) <= BLE_SIGHTING_FRESHNESS_MS) {
-      count++;
-    }
-  }
-  return count;
-}
-
-String normalizeBleIdentityValue(const String& value) {
-  String normalized;
-  normalized.reserve(value.length());
-
-  for (size_t i = 0; i < value.length(); i++) {
-    char c = value[i];
-    if (c >= 'A' && c <= 'F') {
-      normalized += static_cast<char>(c - 'A' + 'a');
-      continue;
-    }
-    if ((c >= 'a' && c <= 'f') || (c >= '0' && c <= '9')) {
-      normalized += c;
-    }
-  }
-
-  return normalized;
-}
-
-void clearBleIdentityTag(uint8_t slot) {
-  if (slot >= MAX_BLE_TAGS) {
-    return;
-  }
-
-  bleIdentityTags[slot].occupied = false;
-  bleIdentityTags[slot].label = "";
-  bleIdentityTags[slot].address = "";
-  bleIdentityTags[slot].minRssi = BLE_TAG_DEFAULT_MIN_RSSI;
-  bleIdentityTags[slot].lastRssi = -127;
-  bleIdentityTags[slot].lastSeenMs = 0;
-}
-
-bool bleIdentityTagPresent(const BleIdentityTag& tag, uint32_t now) {
-  return tag.occupied && (now - tag.lastSeenMs) <= BLE_TAG_FRESHNESS_MS;
-}
-
-uint8_t activeBleTagCount() {
-  uint32_t now = millis();
-  uint8_t count = 0;
-  for (uint8_t i = 0; i < MAX_BLE_TAGS; i++) {
-    if (bleIdentityTagPresent(bleIdentityTags[i], now)) {
-      count++;
-    }
-  }
-  return count;
-}
-
-void appendBleSightingsJson(String& json) {
-  json += ",\"ble_beacon_count\":" + String(activeBleSightingCount());
-  json += ",\"ble_beacons\":[";
-
-  bool first = true;
-  uint32_t now = millis();
-  for (uint8_t i = 0; i < MAX_BLE_SIGHTINGS; i++) {
-    BleBeaconSighting& sighting = bleSightings[i];
-    if (!sighting.occupied || (now - sighting.lastSeenMs) > BLE_SIGHTING_FRESHNESS_MS) {
-      continue;
-    }
-
-    if (!first) {
-      json += ",";
-    }
-    first = false;
-
-    json += "{\"address\":\"" + jsonEscape(sighting.address) + "\"";
-    json += ",\"name\":\"" + jsonEscape(sighting.name) + "\"";
-    json += ",\"service_uuid\":\"" + jsonEscape(sighting.serviceUuid) + "\"";
-    json += ",\"rssi\":" + String(sighting.rssi);
-    json += ",\"age_ms\":" + String(now - sighting.lastSeenMs);
-    json += "}";
-  }
-
-  json += "]";
-}
-
-void appendBleTagsJson(String& json) {
-  const uint32_t now = millis();
-  json += ",\"ble_tagged_people_count\":" + String(activeBleTagCount());
-  json += ",\"ble_tags\":[";
-
-  bool first = true;
-  for (uint8_t i = 0; i < MAX_BLE_TAGS; i++) {
-    const BleIdentityTag& tag = bleIdentityTags[i];
-    if (!tag.occupied) {
-      continue;
-    }
-
-    if (!first) {
-      json += ",";
-    }
-    first = false;
-
-    json += "{\"slot\":" + String(i);
-    json += ",\"label\":\"" + jsonEscape(tag.label) + "\"";
-    json += ",\"address\":\"" + jsonEscape(tag.address) + "\"";
-    json += ",\"min_rssi\":" + String(tag.minRssi);
-    json += ",\"present\":" + String(bleIdentityTagPresent(tag, now) ? "true" : "false");
-    json += ",\"rssi\":" + String(tag.lastRssi);
-    json += ",\"age_ms\":" + String(tag.lastSeenMs > 0 ? (now - tag.lastSeenMs) : BLE_TAG_FRESHNESS_MS + 1UL);
-    json += "}";
-  }
-
-  json += "]";
-}
-
 void announceUdpDiscovery(bool emitEvent) {
   if (WiFi.status() != WL_CONNECTED) {
     return;
@@ -1965,208 +1406,6 @@ void serviceUdpDiscovery() {
   if ((now - lastUdpDiscoveryAnnounceMs) >= UDP_DISCOVERY_ANNOUNCE_MS) {
     announceUdpDiscovery(false);
   }
-}
-
-void updateBleSighting(NimBLEAdvertisedDevice* advertisedDevice) {
-  if (advertisedDevice == nullptr) {
-    return;
-  }
-
-  String address = advertisedDevice->getAddress().toString().c_str();
-  if (address.length() == 0) {
-    return;
-  }
-
-  int slot = -1;
-  for (uint8_t i = 0; i < MAX_BLE_SIGHTINGS; i++) {
-    if (bleSightings[i].occupied && bleSightings[i].address == address) {
-      slot = i;
-      break;
-    }
-    if (!bleSightings[i].occupied && slot < 0) {
-      slot = i;
-    }
-  }
-  if (slot < 0) {
-    slot = 0;
-    for (uint8_t i = 1; i < MAX_BLE_SIGHTINGS; i++) {
-      if (bleSightings[i].lastSeenMs < bleSightings[slot].lastSeenMs) {
-        slot = i;
-      }
-    }
-  }
-
-  bleSightings[slot].occupied = true;
-  bleSightings[slot].address = address;
-  bleSightings[slot].name = advertisedDevice->haveName() ? String(advertisedDevice->getName().c_str()) : "";
-  bleSightings[slot].serviceUuid = advertisedDevice->haveServiceUUID() ? String(advertisedDevice->getServiceUUID().toString().c_str()) : "";
-  bleSightings[slot].rssi = advertisedDevice->getRSSI();
-  bleSightings[slot].lastSeenMs = millis();
-
-  const String normalizedAddress = normalizeBleIdentityValue(address);
-  for (uint8_t tagIndex = 0; tagIndex < MAX_BLE_TAGS; tagIndex++) {
-    BleIdentityTag& tag = bleIdentityTags[tagIndex];
-    if (!tag.occupied || tag.address.length() == 0) {
-      continue;
-    }
-    if (tag.address != normalizedAddress) {
-      continue;
-    }
-    if (advertisedDevice->getRSSI() < tag.minRssi) {
-      continue;
-    }
-
-    tag.lastRssi = advertisedDevice->getRSSI();
-    tag.lastSeenMs = bleSightings[slot].lastSeenMs;
-  }
-}
-
-void initializeBleScanner() {
-  NimBLEDevice::init("");
-  bleScanner = NimBLEDevice::getScan();
-  if (bleScanner == nullptr) {
-    return;
-  }
-
-  bleScanner->setAdvertisedDeviceCallbacks(&bleScanCallbacks, false);
-  bleScanner->setActiveScan(true);
-  bleScanner->setInterval(90);
-  bleScanner->setWindow(45);
-  bleScanner->setDuplicateFilter(false);
-  bleScanner->setMaxResults(0);
-}
-
-void ensureBleScannerActive() {
-  if (bleScanner == nullptr || bleScanner->isScanning()) {
-    return;
-  }
-
-  bleScanner->start(BLE_SCAN_WINDOW_MS, nullptr, false);
-}
-
-void publishBleStates() {
-  if (!HomeAssistantMqttClient.connected()) {
-    return;
-  }
-
-  char numberBuffer[16];
-  snprintf(numberBuffer, sizeof(numberBuffer), "%u", activeBleSightingCount());
-  HomeAssistantMqttClient.publish(homeAssistantStateTopic("ble_beacon_count").c_str(), numberBuffer, true);
-
-  String payload = "[";
-  bool first = true;
-  uint32_t now = millis();
-  for (uint8_t i = 0; i < MAX_BLE_SIGHTINGS; i++) {
-    BleBeaconSighting& sighting = bleSightings[i];
-    if (!sighting.occupied || (now - sighting.lastSeenMs) > BLE_SIGHTING_FRESHNESS_MS) {
-      continue;
-    }
-    if (!first) {
-      payload += ",";
-    }
-    first = false;
-    payload += "{\"address\":\"" + jsonEscape(sighting.address) + "\"";
-    payload += ",\"name\":\"" + jsonEscape(sighting.name) + "\"";
-    payload += ",\"service_uuid\":\"" + jsonEscape(sighting.serviceUuid) + "\"";
-    payload += ",\"rssi\":" + String(sighting.rssi);
-    payload += "}";
-  }
-  payload += "]";
-  HomeAssistantMqttClient.publish(homeAssistantStateTopic("ble_beacons_json").c_str(), payload.c_str(), true);
-
-  snprintf(numberBuffer, sizeof(numberBuffer), "%u", activeBleTagCount());
-  HomeAssistantMqttClient.publish(homeAssistantStateTopic("ble_tagged_people_count").c_str(), numberBuffer, true);
-
-  for (uint8_t tagIndex = 0; tagIndex < MAX_BLE_TAGS; tagIndex++) {
-    const BleIdentityTag& tag = bleIdentityTags[tagIndex];
-    char trackerObjectId[24];
-    char rssiObjectId[24];
-    snprintf(trackerObjectId, sizeof(trackerObjectId), "ble_tag_%02u_tracker", tagIndex);
-    snprintf(rssiObjectId, sizeof(rssiObjectId), "ble_tag_%02u_rssi", tagIndex);
-
-    if (!tag.occupied) {
-      HomeAssistantMqttClient.publish(homeAssistantStateTopic(trackerObjectId).c_str(), "not_home", true);
-      HomeAssistantMqttClient.publish(homeAssistantStateTopic(rssiObjectId).c_str(), "-127", true);
-      continue;
-    }
-
-    const bool present = bleIdentityTagPresent(tag, now);
-    HomeAssistantMqttClient.publish(homeAssistantStateTopic(trackerObjectId).c_str(), present ? "home" : "not_home", true);
-
-    char rssiPayload[16];
-    snprintf(rssiPayload, sizeof(rssiPayload), "%d", present ? tag.lastRssi : -127);
-    HomeAssistantMqttClient.publish(homeAssistantStateTopic(rssiObjectId).c_str(), rssiPayload, true);
-  }
-}
-
-String jsonFieldString(const String& json, const char* fieldName) {
-  String key = String("\"") + fieldName + "\":";
-  int keyIndex = json.indexOf(key);
-  if (keyIndex < 0) {
-    return "";
-  }
-
-  int valueIndex = keyIndex + key.length();
-  if (valueIndex >= json.length()) {
-    return "";
-  }
-
-  if (json[valueIndex] == '"') {
-    valueIndex++;
-    String value;
-    value.reserve(32);
-
-    for (int i = valueIndex; i < json.length(); i++) {
-      char c = json[i];
-      if (c == '"') {
-        return value;
-      }
-      if (c == '\\' && (i + 1) < json.length()) {
-        char escaped = json[++i];
-        switch (escaped) {
-          case 'n': value += '\n'; break;
-          case 'r': value += '\r'; break;
-          case 't': value += '\t'; break;
-          case '\\': value += '\\'; break;
-          case '"': value += '"'; break;
-          default: value += escaped; break;
-        }
-        continue;
-      }
-      value += c;
-    }
-
-    return value;
-  }
-
-  int endIndex = json.indexOf(',', valueIndex);
-  if (endIndex < 0) {
-    endIndex = json.indexOf('}', valueIndex);
-  }
-  if (endIndex < 0) {
-    endIndex = json.length();
-  }
-
-  return json.substring(valueIndex, endIndex);
-}
-
-int jsonFieldInt(const String& json, const char* fieldName, int fallbackValue) {
-  String value = jsonFieldString(json, fieldName);
-  if (value.length() == 0 || value == "null") {
-    return fallbackValue;
-  }
-  return value.toInt();
-}
-
-bool jsonFieldBool(const String& json, const char* fieldName, bool fallbackValue) {
-  String value = jsonFieldString(json, fieldName);
-  if (value == "true") {
-    return true;
-  }
-  if (value == "false") {
-    return false;
-  }
-  return fallbackValue;
 }
 
 void handleRoomSummaryMessage(const String& topic, const String& payload) {
@@ -2661,17 +1900,24 @@ bool radarDetectionCandidate(const RadarDerivedMetrics& metrics) {
   return metrics.estimatedPeople > 0 || metrics.activityScore >= effectiveMinActivityScore();
 }
 
+uint16_t effectivePresenceHoldMs() {
+  return static_cast<uint16_t>(constrain(runtimeConfig.presenceHoldMs,
+                                         MIN_PRESENCE_HOLD_MS,
+                                         MAX_PRESENCE_HOLD_MS));
+}
+
 uint32_t presenceDecayRemainingMs(uint32_t now) {
-  if (runtimeConfig.presenceHoldMs == 0 || lastDetectionMs == 0) {
+  uint16_t holdMs = effectivePresenceHoldMs();
+  if (holdMs == 0 || lastDetectionMs == 0) {
     return 0;
   }
 
   uint32_t elapsed = now - lastDetectionMs;
-  if (elapsed >= runtimeConfig.presenceHoldMs) {
+  if (elapsed >= holdMs) {
     return 0;
   }
 
-  return runtimeConfig.presenceHoldMs - elapsed;
+  return holdMs - elapsed;
 }
 
 uint32_t statusLedColorForState(uint32_t now) {
@@ -2683,12 +1929,13 @@ uint32_t statusLedColorForState(uint32_t now) {
     return StatusRgbLed.Color(0, runtimeConfig.ledBrightness, 0);
   }
 
+  uint16_t holdMs = effectivePresenceHoldMs();
   uint32_t remaining = presenceDecayRemainingMs(now);
-  if (remaining == 0 || runtimeConfig.presenceHoldMs == 0) {
+  if (remaining == 0 || holdMs == 0) {
     return StatusRgbLed.Color(runtimeConfig.ledBrightness, 0, 0);
   }
 
-  uint32_t green = (static_cast<uint32_t>(runtimeConfig.ledBrightness) * remaining) / runtimeConfig.presenceHoldMs;
+  uint32_t green = (static_cast<uint32_t>(runtimeConfig.ledBrightness) * remaining) / holdMs;
   uint32_t red = runtimeConfig.ledBrightness - green;
   return StatusRgbLed.Color(static_cast<uint8_t>(red), static_cast<uint8_t>(green), 0);
 }
@@ -2710,90 +1957,6 @@ void updateStatusRgbLed(uint32_t now) {
   StatusRgbLed.setBrightness(runtimeConfig.ledBrightness);
   StatusRgbLed.setPixelColor(0, statusLedColorForState(now));
   StatusRgbLed.show();
-}
-
-String jsonEscape(const String& value) {
-  String escaped;
-  escaped.reserve(value.length() + 8);
-
-  for (size_t i = 0; i < value.length(); i++) {
-    char c = value[i];
-
-    switch (c) {
-      case '"': escaped += "\\\""; break;
-      case '\\': escaped += "\\\\"; break;
-      case '\b': escaped += "\\b"; break;
-      case '\f': escaped += "\\f"; break;
-      case '\n': escaped += "\\n"; break;
-      case '\r': escaped += "\\r"; break;
-      case '\t': escaped += "\\t"; break;
-      default:
-        if (static_cast<uint8_t>(c) < 0x20) {
-          escaped += '?';
-        } else {
-          escaped += c;
-        }
-        break;
-    }
-  }
-
-  return escaped;
-}
-
-String percentDecode(const String& value) {
-  String decoded;
-  decoded.reserve(value.length());
-
-  for (size_t i = 0; i < value.length(); i++) {
-    char c = value[i];
-
-    if (c == '%' && (i + 2) < value.length()) {
-      char high = value[i + 1];
-      char low = value[i + 2];
-      auto hexValue = [](char hex) -> int {
-        if (hex >= '0' && hex <= '9') return hex - '0';
-        if (hex >= 'a' && hex <= 'f') return 10 + (hex - 'a');
-        if (hex >= 'A' && hex <= 'F') return 10 + (hex - 'A');
-        return -1;
-      };
-
-      int highValue = hexValue(high);
-      int lowValue = hexValue(low);
-
-      if (highValue >= 0 && lowValue >= 0) {
-        decoded += static_cast<char>((highValue << 4) | lowValue);
-        i += 2;
-        continue;
-      }
-    }
-
-    decoded += (c == '+') ? ' ' : c;
-  }
-
-  return decoded;
-}
-
-bool splitConfigFields(const String& payload, String* fields, size_t expectedFieldCount) {
-  size_t fieldIndex = 0;
-  int start = 0;
-
-  while (fieldIndex < expectedFieldCount) {
-    int separator = payload.indexOf('|', start);
-
-    if (separator < 0) {
-      fields[fieldIndex++] = percentDecode(payload.substring(start));
-      break;
-    }
-
-    fields[fieldIndex++] = percentDecode(payload.substring(start, separator));
-    start = separator + 1;
-  }
-
-  while (fieldIndex < expectedFieldCount) {
-    fields[fieldIndex++] = "";
-  }
-
-  return true;
 }
 
 void publishHomeAssistantAvailability(bool online) {
@@ -2956,6 +2119,8 @@ void publishObservationFeed() {
   payload += ",\"friendly_name\":\"" + jsonEscape(runtimeConfig.friendlyName) + "\"";
   payload += ",\"room_id\":\"" + jsonEscape(runtimeConfig.roomId) + "\"";
   payload += ",\"sensor_role\":\"" + jsonEscape(runtimeConfig.sensorRole) + "\"";
+  payload += ",\"device_hostname\":\"" + jsonEscape(deviceHostname()) + "\"";
+  payload += ",\"dashboard_url\":\"" + jsonEscape(deviceDashboardUrl()) + "\"";
   payload += ",\"uptime_s\":" + String(uptimeSeconds);
   payload += ",\"free_heap_bytes\":" + String(freeHeapBytes);
   payload += ",\"wifi\":{";
@@ -3057,6 +2222,11 @@ void publishHomeAssistantDiagnostics() {
     HomeAssistantMqttClient.publish(homeAssistantStateTopic("ip_address").c_str(), WiFi.localIP().toString().c_str(), true);
   }
 
+  String hostnameLabel = deviceHostnameLabel();
+  String dashboardUrl = deviceDashboardUrl();
+  HomeAssistantMqttClient.publish(homeAssistantStateTopic("device_hostname").c_str(), hostnameLabel.c_str(), true);
+  HomeAssistantMqttClient.publish(homeAssistantStateTopic("dashboard_url").c_str(), dashboardUrl.c_str(), true);
+
   snprintf(numberBuffer, sizeof(numberBuffer), "%lu", radarFramesTotal);
   HomeAssistantMqttClient.publish(homeAssistantStateTopic("radar_frames_total").c_str(), numberBuffer, true);
 
@@ -3140,6 +2310,8 @@ void publishHomeAssistantDiscovery() {
   String wifiRssiTopic = homeAssistantStateTopic("wifi_rssi_dbm");
   String wifiChannelTopic = homeAssistantStateTopic("wifi_channel");
   String ipAddressTopic = homeAssistantStateTopic("ip_address");
+  String hostnameTopic = homeAssistantStateTopic("device_hostname");
+  String dashboardUrlTopic = homeAssistantStateTopic("dashboard_url");
   String radarFramesTopic = homeAssistantStateTopic("radar_frames_total");
   String peopleEstimateTopic = homeAssistantStateTopic("people_estimate");
   String activeGateCountTopic = homeAssistantStateTopic("active_gate_count");
@@ -3223,6 +2395,22 @@ void publishHomeAssistantDiscovery() {
                             availabilityTopic,
                             deviceJson,
                             "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:ip-network\",");
+
+  String hostnamePayload = buildHomeAssistantSensorPayload(
+                           escapedFriendlyName + " Hostname",
+                           escapedDeviceId + "_device_hostname",
+                           hostnameTopic,
+                           availabilityTopic,
+                           deviceJson,
+                           "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:identifier\",");
+
+  String dashboardUrlPayload = buildHomeAssistantSensorPayload(
+                               escapedFriendlyName + " Dashboard URL",
+                               escapedDeviceId + "_dashboard_url",
+                               dashboardUrlTopic,
+                               availabilityTopic,
+                               deviceJson,
+                               "\"ent_cat\":\"diagnostic\",\"ic\":\"mdi:web\",");
 
   String radarFramesPayload = buildHomeAssistantSensorPayload(
                               escapedFriendlyName + " Radar Frames",
@@ -3351,6 +2539,8 @@ void publishHomeAssistantDiscovery() {
   String wifiRssiDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "wifi_rssi_dbm");
   String wifiChannelDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "wifi_channel");
   String ipAddressDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "ip_address");
+  String hostnameDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "device_hostname");
+  String dashboardUrlDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "dashboard_url");
   String radarFramesDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "radar_frames_total");
   String peopleEstimateDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "people_estimate");
   String activeGateCountDiscoveryTopic = homeAssistantDiscoveryTopic("sensor", "active_gate_count");
@@ -3374,6 +2564,8 @@ void publishHomeAssistantDiscovery() {
                    HomeAssistantMqttClient.publish(wifiRssiDiscoveryTopic.c_str(), wifiRssiPayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(wifiChannelDiscoveryTopic.c_str(), wifiChannelPayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(ipAddressDiscoveryTopic.c_str(), ipAddressPayload.c_str(), true) &&
+                   HomeAssistantMqttClient.publish(hostnameDiscoveryTopic.c_str(), hostnamePayload.c_str(), true) &&
+                   HomeAssistantMqttClient.publish(dashboardUrlDiscoveryTopic.c_str(), dashboardUrlPayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(radarFramesDiscoveryTopic.c_str(), radarFramesPayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(peopleEstimateDiscoveryTopic.c_str(), peopleEstimatePayload.c_str(), true) &&
                    HomeAssistantMqttClient.publish(activeGateCountDiscoveryTopic.c_str(), activeGateCountPayload.c_str(), true) &&
@@ -4283,7 +3475,9 @@ void handleUsbCommand(const String& command) {
     runtimeConfig.maxDetectionRangeCm = parsedMaxRange > 0 ? static_cast<uint16_t>(parsedMaxRange) : LD2420_GATE_COUNT * LD2420_GATE_SIZE_CM;
     runtimeConfig.minGateEnergy = parsedMinEnergy > 0 ? static_cast<uint16_t>(parsedMinEnergy) : LD2420_ACTIVE_GATE_FLOOR;
     runtimeConfig.sensitivityPercent = static_cast<uint8_t>(constrain(parsedSensitivity > 0 ? parsedSensitivity : 55, 10, 100));
-    runtimeConfig.presenceHoldMs = parsedHoldMs >= 0 ? static_cast<uint16_t>(min(parsedHoldMs, 60000)) : 4000;
+    runtimeConfig.presenceHoldMs = parsedHoldMs >= 0
+      ? static_cast<uint16_t>(constrain(parsedHoldMs, MIN_PRESENCE_HOLD_MS, MAX_PRESENCE_HOLD_MS))
+      : DEFAULT_PRESENCE_HOLD_MS;
     runtimeConfig.minActiveGates = static_cast<uint8_t>(constrain(parsedMinGates > 0 ? parsedMinGates : 1, 1, LD2420_GATE_COUNT));
     runtimeConfig.minActivityScore = static_cast<uint8_t>(constrain(parsedMinActivity > 0 ? parsedMinActivity : 10, 1, 100));
     runtimeConfig.ledEnabled = fields[6] == "1" || fields[6] == "true" || fields[6] == "on";
