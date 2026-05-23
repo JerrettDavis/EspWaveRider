@@ -1,0 +1,40 @@
+.pio/
+.pio/**
+
+# VS Code local state
+.vscode/*
+!.vscode/extensions.json
+
+# Local secrets and board overrides
+include/ha_secrets.h
+include/board_user_config.h
+
+# Node / Playwright artifacts
+node_modules/
+playwright-report/
+test-results/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.*
+
+# Build and coverage artifacts
+build/
+dist/
+coverage/
+*.bin
+*.elf
+*.map
