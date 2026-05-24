@@ -101,8 +101,12 @@ C:\Users\jd\.platformio\penv\Scripts\platformio.exe run --environment esp32-s3-d
 ## Testing
 
 - Firmware build validation is handled through PlatformIO environments.
-- Browser-based `e2e/` Playwright coverage exists for live device scenarios, but those tests are hardware-dependent and are not run in CI.
-- GitHub Actions CI builds the supported firmware environments on every push and pull request.
+- Browser-based `e2e/` Playwright coverage is split into two lanes:
+	- `npm run test:e2e:offline` exercises the hosted dashboard against mocked device snapshots and is safe to run on GitHub-hosted runners.
+	- `npm run test:e2e:live` exercises real multi-node device behavior and is intended for hardware-backed or self-hosted runners.
+- GitHub Actions CI builds the supported firmware environments on every push and pull request and runs the offline dashboard Playwright suite on `ubuntu-latest`.
+- The release pipeline also runs the offline dashboard Playwright suite before semantic release publishes versioned artifacts.
+- The manual `hardware-e2e` workflow is available for self-hosted runners that can reach real devices.
 
 ## Releases
 
@@ -116,6 +120,8 @@ C:\Users\jd\.platformio\penv\Scripts\platformio.exe run --environment esp32-s3-d
 - Firmware builds stamp version, build target, and git SHA into the device snapshot and Home Assistant diagnostics.
 - Tagged GitHub releases are the OTA source of truth. Nodes do not relay binaries to each other yet.
 - A node can sync itself to the highest tagged peer release that matches its board target by downloading the matching GitHub release asset.
+- OTA sync uses pinned HTTPS trust anchors for GitHub, resolves the expected firmware digest from the matching release metadata, and verifies the downloaded binary stream with SHA-256 before activating the update.
+- This protects the network update path against local MITM tampering, but true device-level anti-malware guarantees still require secure boot, flash encryption, and an offline signing story for release artifacts.
 - If peers are on local or unknown builds, the dashboard keeps the sync action disabled and reports why no safe candidate is available.
 
 Manual command examples:

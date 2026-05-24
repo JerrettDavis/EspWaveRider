@@ -10,6 +10,16 @@ module.exports = defineConfig({
   workers: 1,
   retries: 0,
   reporter: [['list'], ['html', { open: 'never' }]],
+  projects: [
+    {
+      name: 'offline-dashboard',
+      testMatch: /.*offline-.*\.spec\.js/
+    },
+    {
+      name: 'live-devices',
+      testMatch: /.*live-.*\.spec\.js/
+    }
+  ],
   use: {
     browserName: 'chromium',
     headless: true,

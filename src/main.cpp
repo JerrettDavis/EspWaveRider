@@ -1,16 +1,19 @@
 #include <Arduino.h>
+#include <HTTPClient.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
 #include <NimBLEDevice.h>
-#include <HTTPUpdate.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
 #include <Adafruit_NeoPixel.h>
+#include <mbedtls/sha256.h>
+#include <time.h>
 
 #ifndef ESPWAVERIDER_FIRMWARE_VERSION
 #define ESPWAVERIDER_FIRMWARE_VERSION "dev"
@@ -104,6 +107,102 @@ static constexpr uint16_t ROOM_SUMMARY_DISTANCE_DELTA_CM = 35;
 static constexpr uint8_t ROOM_SUMMARY_ACTIVITY_DELTA = 6;
 static constexpr const char* FIRMWARE_RELEASE_REPO_OWNER = "JerrettDavis";
 static constexpr const char* FIRMWARE_RELEASE_REPO_NAME = "EspWaveRider";
+static constexpr size_t FIRMWARE_DOWNLOAD_BUFFER_SIZE = 4096;
+static constexpr time_t MIN_TRUSTED_TLS_UNIX_TIME = 1704067200;
+static constexpr uint32_t FIRMWARE_TLS_TIME_SYNC_WAIT_MS = 15000;
+
+static constexpr const char* FIRMWARE_RELEASE_TRUST_ANCHORS = R"PEM(-----BEGIN CERTIFICATE-----
+MIIDXzCCAuagAwIBAgIQNuBZ7YiN1Xrt1XC2cn+b2jAKBggqhkjOPQQDAzBfMQswCQYD
+VQQGEwJHQjEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQDEy1TZWN0aWdv
+IFB1YmxpYyBTZXJ2ZXIgQXV0aGVudGljYXRpb24gUm9vdCBFNDYwHhcNMjEwMzIyMDAw
+MDAwWhcNMzYwMzIxMjM1OTU5WjBgMQswCQYDVQQGEwJHQjEYMBYGA1UEChMPU2VjdGln
+byBMaW1pdGVkMTcwNQYDVQQDEy5TZWN0aWdvIFB1YmxpYyBTZXJ2ZXIgQXV0aGVudGlj
+YXRpb24gQ0EgRFYgRTM2MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaKGnbAUnBYlj
+HDmn/yUhxe3TLxKYuyzc9VXoSaCEV5F73Fhfa/Si/RMsmwTFW3R9s7J6JpYZFmu4do3v
+k/Vgl6OCAYEwggF9MB8GA1UdIwQYMBaAFNEi2kxZ8UtfJjiqndbu6w3D+6lhMB0GA1Ud
+DgQWBBQXmagEwW/kLXCoChA9A9PpGrgmYzAOBgNVHQ8BAf8EBAMCAYYwEgYDVR0TAQH/
+BAgwBgEB/wIBADAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwGwYDVR0gBBQw
+EjAGBgRVHSAAMAgGBmeBDAECATBUBgNVHR8ETTBLMEmgR6BFhkNodHRwOi8vY3JsLnNl
+Y3RpZ28uY29tL1NlY3RpZ29QdWJsaWNTZXJ2ZXJBdXRoZW50aWNhdGlvblJvb3RFNDYu
+Y3JsMIGEBggrBgEFBQcBAQR4MHYwTwYIKwYBBQUHMAKGQ2h0dHA6Ly9jcnQuc2VjdGln
+by5jb20vU2VjdGlnb1B1YmxpY1NlcnZlckF1dGhlbnRpY2F0aW9uUm9vdEU0Ni5wN2Mw
+IwYIKwYBBQUHMAGGF2h0dHA6Ly9vY3NwLnNlY3RpZ28uY29tMAoGCCqGSM49BAMDA2cA
+MGQCMFsKnBQDh64l+v+aUYWjDCJKQMxHUUGmcwAYDIjJ9pbRYItMCIx5xu0oUb6sIfTX
+qQIwPddcsDE4KdeLu1hJdpHgdLvsHAK3vygyLGujMU9xBJCDackRT93VHEE0gppgNqdV
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIICOjCCAcGgAwIBAgIQQvLM2htpN0RfFf51KBC49DAKBggqhkjOPQQDAzBfMQswCQYD
+VQQGEwJHQjEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQDEy1TZWN0aWdv
+IFB1YmxpYyBTZXJ2ZXIgQXV0aGVudGljYXRpb24gUm9vdCBFNDYwHhcNMjEwMzIyMDAw
+MDAwWhcNNDYwMzIxMjM1OTU5WjBfMQswCQYDVQQGEwJHQjEYMBYGA1UEChMPU2VjdGln
+byBMaW1pdGVkMTYwNAYDVQQDEy1TZWN0aWdvIFB1YmxpYyBTZXJ2ZXIgQXV0aGVudGlj
+YXRpb24gUm9vdCBFNDYwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAR2+pmpbiDt+dd34wc7
+qNs9Xzjoq1WmVk/WSOrsfy2qw7LFeeyZYX8QeccCWvkEN/U0NSt3zn8gj1KjAIns1aei
+bVvjS5KToID1AZTc8GgHHs3u/iVStSBDHBv+6xnOQ6OjQjBAMB0GA1UdDgQWBBTRItpM
+WfFLXyY4qp3W7usNw/upYTAOBgNVHQ8BAf8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAK
+BggqhkjOPQQDAwNnADBkAjAn7qRaqCG76UeXlImldCBteU/IvZNeWBj7LRoAasm4PdCk
+T0RHlAFWovgzJQxC36oCMB3q4S6ILuH5px0CMk7yn2xVdOOurvulGu7t0vzCAxHrRVxgE
+D1cf5kDW21USAGKcw==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIFBjCCAu6gAwIBAgIRAMISMktwqbSRcdxA9+KFJjwwDQYJKoZIhvcNAQELBQAwTzEL
+MAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2VhcmNoIEdy
+b3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMjQwMzEzMDAwMDAwWhcNMjcwMzEy
+MjM1OTU5WjAzMQswCQYDVQQGEwJVUzEWMBQGA1UEChMNTGV0J3MgRW5jcnlwdDEMMAoG
+A1UEAxMDUjEyMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2pgodK2+lP47
+4B7i5Ut1qywSf+2nAzJ+Npfs6DGPpRONC5kuHs0BUT1M5ShuCVUxqqUiXXL0LQfCTUA8
+3wEjuXg39RplMjTmhnGdBO+ECFu9AhqZ66YBAJpzkG2Pogeg0JfT2kVhgTU9FPnEwF9q
+3AuWGrCf4yrqvSrWmMebcas7dA8827JgvlpLThjp2ypzXIlhZZ7+7Tymy05v5J75AEaz
+/xlNKmOzjmbGGIVwx1Blbzt05UiDDwhYXS0jnV6j/ujbAKHS9OMZTfLuevYnnuXNnC2i
+8n+cF63vEzc50bTILEHWhsDp7CH4WRt/uTp8n1wBnWIEwii9Cq08yhDsGwIDAQABo4H4
+MIH1MA4GA1UdDwEB/wQEAwIBhjAdBgNVHSUEFjAUBggrBgEFBQcDAgYIKwYBBQUHAwEw
+EgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQUALUp8i2ObzHom0yteD763OkM0dIw
+HwYDVR0jBBgwFoAUebRZ5nu25eQBc4AIiMgaWPbpm24wMgYIKwYBBQUHAQEEJjAkMCIG
+CCsGAQUFBzAChhZodHRwOi8veDEuaS5sZW5jci5vcmcvMBMGA1UdIAQMMAowCAYGZ4EM
+AQIBMCcGA1UdHwQgMB4wHKAaoBiGFmh0dHA6Ly94MS5jLmxlbmNyLm9yZy8wDQYJKoZI
+hvcNAQELBQADggIBAI910AnPanZIZTKS3rVEyIV29BWEjAK/duuz8eL5boSoVpHhkkv3
+4eoAeEiPdZLj5EZ7G2ArIK+gzhTlRQ1q4FKGpPPaFBSpqV/xbUb5UlAXQOnkHn3mFVj+
+qYv87/WeY+Bm4sN3Ox8BhyaU7UAQ3LeZ7N1X01xxQe4wIAAE3JVLUCiHmZL+qoCUtgYI
+FPgcg350QMUIWgxPXNGEncT921ne7nluI02V8pLUmClqXOsCwULw+PVOZCB7qOMxxMBo
+CUeL2Ll4oMpOSr5pJCpLN3tRA2s6P1KLs9TSrVhOk+7LX28NMUlIusQ/nxLJID0RhAeF
+tPjyOCOscQBA53+NRjSCak7P4A5jX7ppmkcJECL+S0i3kXVUy5Me5BbrU8973jZNv/ax
+6+ZK6TM8jWmimL6of6OrX7ZU6E2WqazzsFrLG3o2kySbzlhSgJ81Cl4tv3SbYiYXnJEx
+KQvzf83DYotox3f0fwv7xln1A2ZLplCb0O+l/AK0YE0DS2FPxSAHi0iwMfW2nNHJrXcY
+3LLHD77gRgje4Eveubi2xxa+Nmk/hmhLdIETiVDFanoCrMVIpQ59XWHkzdFmoHXHBV7o
+ibVjGSO7ULSQ7MJ1Nz51phuDJSgAIU7A0zrLnOrAj/dfrlEWRhCvAgbuwLZX1A2sjNjX
+oPOHbsPiy+lO1KF8/XY7
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAwTzEL
+MAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2VhcmNoIEdy
+b3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4WhcNMzUwNjA0
+MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkg
+UmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBYMTCCAiIwDQYJKoZIhvcN
+AQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygch77ct984kIxuPOZXoHj3dcKi
+/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+0TM8ukj13Xnfs7j/EvEhmkvBioZx
+aUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6UA5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0t
+tov0DiNewNwIRt18jA8+o+u3dpjq+sWT8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4
+VMk7BPZ7hm/ELNKjD+Jo2FR3qyHB5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxd
+AQ4Q7e2RCOFvu396j3x+UCB5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6aw
+BdpUKD9jf1b0SHzUvKBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEada
+o0xAH0ahmbWnOlfuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk
+3SzynTnjh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwr
+bwqHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CIrU
+7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8E
+BTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkqhkiG9w0BAQsF
+AAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZLubhzEFnTIZd+50xx
++7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ3BebYhtF8GaV0nxvwuo7
+7x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KKNFtY2PwByVS5uCbMiogziUwt
+hDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5ORAzI4JMPJ+GslWYHb4phowim57i
+aztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7UrTkXWStAmzOVyyghqpZXjFaH3pO3JLF+l
+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdCjNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+
+63SM1N95R1NbdWhscdCb+ZAJzVcoyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4U
+i0/1lvh+wjChP4kqKOJ2qxq4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0
+GE44Za4rF2LN9d11TPAmRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4
+r7g1SgEEzwxA57demyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1An
+X5iItreGCc=
+-----END CERTIFICATE-----
+)PEM";
 
 static constexpr uint8_t ENERGY_HEADER[] = {0xF4, 0xF3, 0xF2, 0xF1};
 static constexpr uint8_t ENERGY_FOOTER[] = {0xF8, 0xF7, 0xF6, 0xF5};
@@ -389,6 +488,13 @@ String semanticVersionCore(const String& version);
 int compareSemanticVersions(const String& leftVersion, const String& rightVersion);
 bool findHighestPeerReleaseVersion(String& nodeId, String& version, String& source);
 String firmwareReleaseAssetUrl(const String& versionCore);
+String firmwareReleaseAssetName(const String& versionCore, const char* extension);
+String firmwareReleaseApiUrl(const String& versionCore);
+bool beginTrustedFirmwareRequest(HTTPClient& http, WiFiClientSecure& client, const String& url, String& error);
+bool ensureTrustedTlsClock(String& error);
+String extractSha256Hex(const String& value);
+String fetchFirmwareReleaseChecksum(const String& versionCore, String& error);
+bool downloadAndApplyFirmware(const String& downloadUrl, const String& expectedSha256, String& error);
 void appendFirmwareSyncJson(String& json);
 void requestFirmwareUpdate(const String& targetVersion, const String& targetNodeId, const String& targetSource);
 void serviceFirmwareSync();
@@ -2892,8 +2998,286 @@ String firmwareReleaseAssetUrl(const String& versionCore) {
   }
 
   const String tag = "v" + normalizedCore;
-  const String assetName = String("EspWaveRider-") + normalizedCore + "-" + firmwareBuildTarget() + ".bin";
+  const String assetName = firmwareReleaseAssetName(normalizedCore, ".bin");
   return String("https://github.com/") + FIRMWARE_RELEASE_REPO_OWNER + "/" + FIRMWARE_RELEASE_REPO_NAME + "/releases/download/" + tag + "/" + assetName;
+}
+
+String firmwareReleaseAssetName(const String& versionCore, const char* extension) {
+  const String normalizedCore = semanticVersionCore(versionCore);
+  if (normalizedCore.length() == 0) {
+    return "";
+  }
+
+  return String("EspWaveRider-") + normalizedCore + "-" + firmwareBuildTarget() + extension;
+}
+
+String firmwareReleaseApiUrl(const String& versionCore) {
+  const String normalizedCore = semanticVersionCore(versionCore);
+  if (normalizedCore.length() == 0) {
+    return "";
+  }
+
+  return String("https://api.github.com/repos/") + FIRMWARE_RELEASE_REPO_OWNER + "/" + FIRMWARE_RELEASE_REPO_NAME + "/releases/tags/v" + normalizedCore;
+}
+
+bool beginTrustedFirmwareRequest(HTTPClient& http, WiFiClientSecure& client, const String& url, String& error) {
+  client.setCACert(FIRMWARE_RELEASE_TRUST_ANCHORS);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(20000);
+
+  if (http.begin(client, url)) {
+    return true;
+  }
+
+  error = "unable_to_open_trusted_https_request";
+  return false;
+}
+
+bool ensureTrustedTlsClock(String& error) {
+  time_t now = time(nullptr);
+  if (now >= MIN_TRUSTED_TLS_UNIX_TIME) {
+    return true;
+  }
+
+  configTime(0, 0, "time.cloudflare.com", "pool.ntp.org", "time.google.com");
+  const uint32_t startMs = millis();
+  while ((millis() - startMs) < FIRMWARE_TLS_TIME_SYNC_WAIT_MS) {
+    now = time(nullptr);
+    if (now >= MIN_TRUSTED_TLS_UNIX_TIME) {
+      return true;
+    }
+    delay(200);
+  }
+
+  error = "clock_not_synced_for_tls";
+  return false;
+}
+
+String extractSha256Hex(const String& value) {
+  String digest;
+  digest.reserve(64);
+
+  for (size_t index = 0; index < value.length(); index++) {
+    const char current = value[index];
+    const bool isDigit = current >= '0' && current <= '9';
+    const bool isLowerHex = current >= 'a' && current <= 'f';
+    const bool isUpperHex = current >= 'A' && current <= 'F';
+
+    if (isDigit || isLowerHex || isUpperHex) {
+      digest += static_cast<char>(tolower(current));
+      if (digest.length() == 64) {
+        return digest;
+      }
+      continue;
+    }
+
+    if (digest.length() > 0) {
+      digest = "";
+    }
+  }
+
+  return "";
+}
+
+String extractGitHubApiMessage(const String& value) {
+  const int messageFieldIndex = value.indexOf("\"message\":\"");
+  if (messageFieldIndex < 0) {
+    return "";
+  }
+
+  const int messageStart = messageFieldIndex + strlen("\"message\":\"");
+  const int messageEnd = value.indexOf('"', messageStart);
+  if (messageEnd <= messageStart) {
+    return "";
+  }
+
+  String message = value.substring(messageStart, messageEnd);
+  message.replace(" ", "_");
+  message.replace("\n", "_");
+  message.replace("\r", "_");
+  return message;
+}
+
+String fetchFirmwareReleaseChecksum(const String& versionCore, String& error) {
+  const String releaseApiUrl = firmwareReleaseApiUrl(versionCore);
+  const String firmwareAssetName = firmwareReleaseAssetName(versionCore, ".bin");
+  if (releaseApiUrl.length() == 0 || firmwareAssetName.length() == 0) {
+    error = "release_api_url_missing";
+    return "";
+  }
+
+  WiFiClientSecure client;
+  HTTPClient http;
+  if (!beginTrustedFirmwareRequest(http, client, releaseApiUrl, error)) {
+    return "";
+  }
+
+  http.setUserAgent("EspWaveRider-OTA/1.0");
+  http.addHeader("User-Agent", "EspWaveRider-OTA/1.0");
+  http.addHeader("Accept", "application/vnd.github+json");
+  http.addHeader("X-GitHub-Api-Version", "2022-11-28");
+
+  const int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    error = String("release_api_http_") + httpCode;
+    if (httpCode < 0) {
+      error += ":" + HTTPClient::errorToString(httpCode);
+    } else {
+      const String responseBody = http.getString();
+      const String apiMessage = extractGitHubApiMessage(responseBody);
+      if (apiMessage.length() > 0) {
+        error += ":" + apiMessage;
+      }
+    }
+    http.end();
+    return "";
+  }
+
+  const String releaseBody = http.getString();
+  http.end();
+
+  const int assetNameIndex = releaseBody.indexOf(String("\"name\":\"") + firmwareAssetName + "\"");
+  if (assetNameIndex < 0) {
+    error = "release_api_asset_missing";
+    return "";
+  }
+
+  const int digestFieldIndex = releaseBody.indexOf("\"digest\":\"", assetNameIndex);
+  if (digestFieldIndex < 0) {
+    error = "release_api_digest_missing";
+    return "";
+  }
+
+  const int digestValueStart = digestFieldIndex + strlen("\"digest\":\"");
+  const int digestValueEnd = releaseBody.indexOf('"', digestValueStart);
+  if (digestValueEnd <= digestValueStart) {
+    error = "release_api_digest_parse_failed";
+    return "";
+  }
+
+  const String checksum = extractSha256Hex(releaseBody.substring(digestValueStart, digestValueEnd));
+  if (checksum.length() == 64) {
+    return checksum;
+  }
+
+  error = "release_api_digest_invalid";
+  return "";
+}
+
+bool downloadAndApplyFirmware(const String& downloadUrl, const String& expectedSha256, String& error) {
+  WiFiClientSecure client;
+  HTTPClient http;
+  if (!beginTrustedFirmwareRequest(http, client, downloadUrl, error)) {
+    return false;
+  }
+
+  const int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    error = String("download_http_") + httpCode;
+    if (httpCode < 0) {
+      error += ":" + HTTPClient::errorToString(httpCode);
+    }
+    http.end();
+    return false;
+  }
+
+  const int contentLength = http.getSize();
+  if (contentLength <= 0) {
+    error = "download_size_missing";
+    http.end();
+    return false;
+  }
+
+  if (!Update.begin(contentLength, U_FLASH)) {
+    error = String("update_begin_failed:") + Update.errorString();
+    http.end();
+    return false;
+  }
+
+  mbedtls_sha256_context sha256Context;
+  mbedtls_sha256_init(&sha256Context);
+  mbedtls_sha256_starts_ret(&sha256Context, 0);
+
+  WiFiClient* stream = http.getStreamPtr();
+  static uint8_t buffer[FIRMWARE_DOWNLOAD_BUFFER_SIZE];
+  size_t bytesWritten = 0;
+  uint32_t lastChunkMs = millis();
+
+  while (http.connected() && bytesWritten < static_cast<size_t>(contentLength)) {
+    const size_t available = stream->available();
+    if (available == 0) {
+      if ((millis() - lastChunkMs) > 15000) {
+        error = "download_timeout";
+        Update.abort();
+        http.end();
+        mbedtls_sha256_free(&sha256Context);
+        return false;
+      }
+      delay(1);
+      continue;
+    }
+
+    const size_t requested = min(sizeof(buffer), min(available, static_cast<size_t>(contentLength) - bytesWritten));
+    const size_t chunkSize = stream->readBytes(buffer, requested);
+    if (chunkSize == 0) {
+      continue;
+    }
+
+    lastChunkMs = millis();
+    mbedtls_sha256_update_ret(&sha256Context, buffer, chunkSize);
+
+    if (Update.write(buffer, chunkSize) != chunkSize) {
+      error = String("update_write_failed:") + Update.errorString();
+      Update.abort();
+      http.end();
+      mbedtls_sha256_free(&sha256Context);
+      return false;
+    }
+
+    bytesWritten += chunkSize;
+  }
+
+  http.end();
+
+  if (bytesWritten != static_cast<size_t>(contentLength)) {
+    error = "download_incomplete";
+    Update.abort();
+    mbedtls_sha256_free(&sha256Context);
+    return false;
+  }
+
+  uint8_t actualDigestBytes[32];
+  mbedtls_sha256_finish_ret(&sha256Context, actualDigestBytes);
+  mbedtls_sha256_free(&sha256Context);
+
+  static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+  String actualDigest;
+  actualDigest.reserve(64);
+  for (size_t index = 0; index < sizeof(actualDigestBytes); index++) {
+    const uint8_t value = actualDigestBytes[index];
+    actualDigest += HEX_DIGITS[(value >> 4) & 0x0F];
+    actualDigest += HEX_DIGITS[value & 0x0F];
+  }
+
+  if (actualDigest != expectedSha256) {
+    error = String("sha256_mismatch:") + actualDigest;
+    Update.abort();
+    return false;
+  }
+
+  if (!Update.end()) {
+    error = String("update_finalize_failed:") + Update.errorString();
+    Update.abort();
+    return false;
+  }
+
+  if (!Update.isFinished()) {
+    error = "update_not_finished";
+    Update.abort();
+    return false;
+  }
+
+  return true;
 }
 
 void appendFirmwareSyncJson(String& json) {
@@ -3006,13 +3390,48 @@ void serviceFirmwareSync() {
   finishJsonEvent();
   broadcastDeviceSnapshot();
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  httpUpdate.rebootOnUpdate(false);
-  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  const t_httpUpdate_return result = httpUpdate.update(client, firmwareSyncState.downloadUrl);
+  String tlsClockError;
+  if (!ensureTrustedTlsClock(tlsClockError)) {
+    firmwareSyncState.inProgress = false;
+    firmwareSyncState.lastSuccess = false;
+    firmwareSyncState.lastError = tlsClockError;
+    firmwareSyncState.statusText = "Firmware sync failed: device clock is not trusted for TLS validation.";
+    firmwareSyncState.lastCompletedMs = millis();
 
-  if (result == HTTP_UPDATE_OK) {
+    printJsonEventPrefix("firmware_sync_failed");
+    Serial.print(",\"target_version\":");
+    printJsonString(firmwareSyncState.targetVersion);
+    Serial.print(",\"error\":");
+    printJsonString(firmwareSyncState.lastError);
+    finishJsonEvent();
+    broadcastDeviceSnapshot();
+    return;
+  }
+
+  String checksumError;
+  const String expectedSha256 = fetchFirmwareReleaseChecksum(firmwareSyncState.targetVersion, checksumError);
+  if (expectedSha256.length() != 64) {
+    firmwareSyncState.inProgress = false;
+    firmwareSyncState.lastSuccess = false;
+    firmwareSyncState.lastError = checksumError;
+    firmwareSyncState.statusText = String("Firmware sync failed: unable to verify release checksum (") + checksumError + ").";
+    firmwareSyncState.lastCompletedMs = millis();
+
+    printJsonEventPrefix("firmware_sync_failed");
+    Serial.print(",\"target_version\":");
+    printJsonString(firmwareSyncState.targetVersion);
+    Serial.print(",\"error\":");
+    printJsonString(firmwareSyncState.lastError);
+    finishJsonEvent();
+    broadcastDeviceSnapshot();
+    return;
+  }
+
+  firmwareSyncState.statusText = String("Verified release checksum ") + expectedSha256.substring(0, 12) + "..., downloading firmware.";
+  broadcastDeviceSnapshot();
+
+  String applyError;
+  if (downloadAndApplyFirmware(firmwareSyncState.downloadUrl, expectedSha256, applyError)) {
     firmwareSyncState.inProgress = false;
     firmwareSyncState.lastSuccess = true;
     firmwareSyncState.statusText = String("Firmware ") + firmwareSyncState.targetVersion + " applied; rebooting.";
@@ -3030,7 +3449,7 @@ void serviceFirmwareSync() {
 
   firmwareSyncState.inProgress = false;
   firmwareSyncState.lastSuccess = false;
-  firmwareSyncState.lastError = httpUpdate.getLastErrorString();
+  firmwareSyncState.lastError = applyError;
   firmwareSyncState.statusText = String("Firmware sync failed: ") + firmwareSyncState.lastError;
   firmwareSyncState.lastCompletedMs = millis();
 

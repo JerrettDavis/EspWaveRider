@@ -1,0 +1,48 @@
+name: hardware-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      node1_url:
+        description: Base URL for node 1
+        required: false
+        default: http://10.0.107.148
+      node2_url:
+        description: Base URL for node 2
+        required: false
+        default: http://10.0.107.149
+
+jobs:
+  live-device-e2e:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run live hardware e2e
+        env:
+          MMWAVE_NODE1_URL: ${{ inputs.node1_url }}
+          MMWAVE_NODE2_URL: ${{ inputs.node2_url }}
+        run: npm run test:e2e:live
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-e2e-report
+          path: |
+            playwright-report/
+            test-results/

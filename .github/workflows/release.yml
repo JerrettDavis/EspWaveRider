@@ -12,7 +12,39 @@ permissions:
   pull-requests: write
 
 jobs:
+  e2e-offline-dashboard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run offline dashboard e2e
+        run: npm run test:e2e:offline
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-offline-dashboard-e2e-report
+          path: |
+            playwright-report/
+            test-results/
+
   semantic-release:
+    needs: e2e-offline-dashboard
     runs-on: ubuntu-latest
     outputs:
       published: ${{ steps.semantic.outputs.new_release_published }}
