@@ -4,6 +4,13 @@ Portable ESP32 mmWave presence and telemetry firmware with a hosted diagnostics 
 
 The repo is structured so hardware wiring can be remapped without editing application logic. The normal workflow is: choose a PlatformIO environment, optionally override a few board macros, then build and flash.
 
+## Documentation
+
+- The DocFX source lives in `docs/`.
+- Build it locally with `dotnet tool update --global docfx` followed by `docfx docs/docfx.json`.
+- The generated site is emitted to `docs/_site`.
+- `.github/workflows/docs.yml` publishes the site to GitHub Pages from `main`.
+
 ## What it does
 
 - Reads HLK-LD2420 radar data over UART plus presence GPIO

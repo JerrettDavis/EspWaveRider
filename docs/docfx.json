@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/dotnet/docfx/main/schemas/docfx.schema.json",
+  "build": {
+    "content": [
+      {
+        "files": [
+          "index.md",
+          "install.md",
+          "configuration.md",
+          "operations.md",
+          "api.md",
+          "testing-and-release.md",
+          "toc.yml"
+        ]
+      }
+    ],
+    "resource": [
+      {
+        "files": [
+          "images/**"
+        ]
+      }
+    ],
+    "output": "_site",
+    "template": [
+      "default",
+      "modern"
+    ],
+    "globalMetadata": {
+      "_appTitle": "EspWaveRider Docs",
+      "_appName": "EspWaveRider",
+      "_appFooter": "ESP32 mmWave presence firmware, diagnostics UI, and Home Assistant integration.",
+      "_enableSearch": true,
+      "_gitContribute": {
+        "repo": "https://github.com/JerrettDavis/EspWaveRider",
+        "branch": "main"
+      }
+    },
+    "markdownEngineName": "markdig"
+  }
+}

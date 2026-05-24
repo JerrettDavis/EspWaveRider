@@ -1,0 +1,12 @@
+- name: Overview
+  href: index.md
+- name: Install
+  href: install.md
+- name: Configuration
+  href: configuration.md
+- name: Operations
+  href: operations.md
+- name: HTTP And Commands
+  href: api.md
+- name: Testing And Releases
+  href: testing-and-release.md
