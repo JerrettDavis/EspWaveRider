@@ -1,3 +1,9 @@
+## [1.0.2](https://github.com/JerrettDavis/EspWaveRider/compare/v1.0.1...v1.0.2) (2026-05-24)
+
+### Bug Fixes
+
+* harden ota sync and add hosted e2e coverage ([f17a541](https://github.com/JerrettDavis/EspWaveRider/commit/f17a5418cdc407ff9c6ac5b90501a7ee670d602a))
+
 ## [1.0.1](https://github.com/JerrettDavis/EspWaveRider/compare/v1.0.0...v1.0.1) (2026-05-23)
 
 ### Bug Fixes
