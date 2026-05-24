@@ -3,9 +3,12 @@
   "private": true,
   "scripts": {
     "release": "semantic-release",
+    "test:unit": "python -m unittest discover -s test -p \"test_*_unit.py\" -v",
+    "test:integration": "python -m unittest discover -s test -p \"test_*_integration.py\" -v",
     "test:e2e": "playwright test",
     "test:e2e:offline": "playwright test --project offline-dashboard",
     "test:e2e:live": "playwright test --project live-devices",
+    "test:e2e:local": "playwright test --project live-devices",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui"
   },

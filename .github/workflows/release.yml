@@ -12,6 +12,36 @@ permissions:
   pull-requests: write
 
 jobs:
+  python-unit-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run embed library unit tests
+        run: python -m unittest discover -s test -p "test_*_unit.py" -v
+
+  python-integration-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run embed library integration tests
+        run: python -m unittest discover -s test -p "test_*_integration.py" -v
+
   e2e-offline-dashboard:
     runs-on: ubuntu-latest
 
@@ -44,7 +74,10 @@ jobs:
             test-results/
 
   semantic-release:
-    needs: e2e-offline-dashboard
+    needs:
+      - python-unit-tests
+      - python-integration-tests
+      - e2e-offline-dashboard
     runs-on: ubuntu-latest
     outputs:
       published: ${{ steps.semantic.outputs.new_release_published }}

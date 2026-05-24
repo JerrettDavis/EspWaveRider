@@ -101,11 +101,14 @@ C:\Users\jd\.platformio\penv\Scripts\platformio.exe run --environment esp32-s3-d
 ## Testing
 
 - Firmware build validation is handled through PlatformIO environments.
+- `npm run test:unit` runs fast Python unit tests for the firmware metadata and visualizer embedding helpers.
+- `npm run test:integration` runs Python integration tests that verify HTML embedding/header generation behavior.
 - Browser-based `e2e/` Playwright coverage is split into two lanes:
 	- `npm run test:e2e:offline` exercises the hosted dashboard against mocked device snapshots and is safe to run on GitHub-hosted runners.
 	- `npm run test:e2e:live` exercises real multi-node device behavior and is intended for hardware-backed or self-hosted runners.
-- GitHub Actions CI builds the supported firmware environments on every push and pull request and runs the offline dashboard Playwright suite on `ubuntu-latest`.
-- The release pipeline also runs the offline dashboard Playwright suite before semantic release publishes versioned artifacts.
+	- `npm run test:e2e:local` is the local alias for the live device suite when developing against nodes on the LAN.
+- GitHub Actions CI builds the supported firmware environments on every push and pull request, runs Python unit tests, runs Python integration tests, and runs the offline dashboard Playwright suite on `ubuntu-latest`.
+- The release pipeline also runs the Python unit tests, Python integration tests, and offline dashboard Playwright suite before semantic release publishes versioned artifacts.
 - The manual `hardware-e2e` workflow is available for self-hosted runners that can reach real devices.
 
 ## Releases
