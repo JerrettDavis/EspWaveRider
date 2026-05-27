@@ -52,7 +52,8 @@ use esp_nvs::{Key, Nvs};
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use esp_radio::wifi::{
     self as radio_wifi,
-    ap::AccessPointConfig,
+    ap::{AccessPointConfig, AccessPointInfo},
+    scan::{ScanConfig, ScanTypeConfig},
     sta::StationConfig,
     AuthenticationMethod as WifiAuthenticationMethod,
     Config as RadioWifiConfig,
@@ -2072,7 +2073,9 @@ async fn main(spawner: Spawner) {
             &mut usb_serial,
             &mut radar_uart,
             settings.as_mut(),
-        );
+            &mut wifi_controller,
+        )
+        .await;
         state.poll_presence(presence_pin.is_high(), now);
         update_status_led(&mut status_led, state.status_led_rgb(now));
         #[cfg(feature = "usb-console")]
@@ -2094,7 +2097,9 @@ async fn main(spawner: Spawner) {
                         &mut usb_serial,
                         &mut radar_uart,
                         settings.as_mut(),
-                    );
+                        &mut wifi_controller,
+                    )
+                    .await;
                 }
                 b'\r' => {}
                 0x08 | 0x7f => {
@@ -3242,12 +3247,13 @@ async fn socket_write_all(socket: &mut TcpSocket<'_>, mut bytes: &[u8]) -> Resul
     Ok(())
 }
 
-fn process_pending_http_request(
+async fn process_pending_http_request(
     state: &mut FirmwareState,
     boot_started: &Instant,
     usb_serial: &mut UsbSerialJtag<'_, esp_hal::Blocking>,
     radar_uart: &mut Uart<'_, Blocking>,
     settings: Option<&mut SettingsNvs>,
+    wifi_controller: &mut Option<WifiController<'static>>,
 ) {
     let Ok(request) = HTTP_REQUEST_CHANNEL.receiver().try_receive() else {
         return;
@@ -3263,7 +3269,9 @@ fn process_pending_http_request(
                 usb_serial,
                 radar_uart,
                 settings,
+                wifi_controller,
             )
+            .await
         }
     };
 
@@ -3387,27 +3395,32 @@ fn flush_radar_buffer_if_needed(state: &mut FirmwareState, uptime_ms: u32, force
     }
 }
 
-fn process_command_buffer(
+async fn process_command_buffer(
     command_buffer: &mut heapless::Vec<u8, 256>,
     state: &mut FirmwareState,
     boot_started: &Instant,
     usb_serial: &mut UsbSerialJtag<'_, esp_hal::Blocking>,
     radar_uart: &mut Uart<'_, Blocking>,
     settings: Option<&mut SettingsNvs>,
+    wifi_controller: &mut Option<WifiController<'static>>,
 ) {
     if command_buffer.is_empty() {
         return;
     }
 
     let response = match core::str::from_utf8(command_buffer.as_slice()) {
-        Ok(command) => handle_command(
-            command.trim(),
-            state,
-            boot_started,
-            usb_serial,
-            radar_uart,
-            settings,
-        ),
+        Ok(command) => {
+            handle_command(
+                command.trim(),
+                state,
+                boot_started,
+                usb_serial,
+                radar_uart,
+                settings,
+                wifi_controller,
+            )
+            .await
+        }
         Err(_) => String::from(r#"{"error":"invalid_utf8"}"#),
     };
 
@@ -3415,13 +3428,14 @@ fn process_command_buffer(
     write_line(usb_serial, &response);
 }
 
-fn handle_command(
+async fn handle_command(
     command: &str,
     state: &mut FirmwareState,
     boot_started: &Instant,
     usb_serial: &mut UsbSerialJtag<'_, esp_hal::Blocking>,
     radar_uart: &mut Uart<'_, Blocking>,
     mut settings: Option<&mut SettingsNvs>,
+    wifi_controller: &mut Option<WifiController<'static>>,
 ) -> String {
     if command.is_empty() || command == "snapshot" {
         return state.snapshot_json(uptime_ms(boot_started));
@@ -3435,9 +3449,9 @@ fn handle_command(
         Ok(DeviceCommand::Ping)
         | Ok(DeviceCommand::Status)
         | Ok(DeviceCommand::HomeAssistantStatus)
-        | Ok(DeviceCommand::WifiScan)
         | Ok(DeviceCommand::BleTagConfig(_))
         | Ok(DeviceCommand::BleTagClear(_)) => state.snapshot_json(uptime_ms(boot_started)),
+        Ok(DeviceCommand::WifiScan) => build_wifi_scan_results_json(wifi_controller).await,
         Ok(home_assistant_command @ DeviceCommand::HomeAssistantConfig(_)) => {
             match home_assistant_command.home_assistant_config_payload() {
                 Ok(payload) => {
@@ -3525,6 +3539,116 @@ fn handle_command(
         }
         Err(_) => String::from(r#"{"error":"unsupported_command"}"#),
     }
+}
+
+async fn build_wifi_scan_results_json(
+    wifi_controller: &mut Option<WifiController<'static>>,
+) -> String {
+    let Some(controller) = wifi_controller.as_mut() else {
+        return String::from(r#"{"error":"wifi_scan_unavailable"}"#);
+    };
+
+    let scan_config = ScanConfig::default()
+        .with_show_hidden(true)
+        .with_max(16)
+        .with_scan_type(ScanTypeConfig::Active {
+            min: esp_hal::time::Duration::from_millis(10),
+            max: esp_hal::time::Duration::from_millis(300),
+        });
+
+    match controller.scan_async(&scan_config).await {
+        Ok(results) => wifi_scan_results_json(&results),
+        Err(err) => {
+            let mut body = String::from("{\"event\":\"wifi_scan_results\",\"count\":0,\"networks\":[],\"error\":\"");
+            body.push_str(format_wifi_error_token(&err));
+            body.push_str("\"}");
+            body
+        }
+    }
+}
+
+fn wifi_scan_results_json(results: &[AccessPointInfo]) -> String {
+    let mut body = String::from("{\"event\":\"wifi_scan_results\",\"count\":");
+    append_u32(&mut body, results.len().min(u32::MAX as usize) as u32);
+    body.push_str(",\"networks\":[");
+
+    for (index, network) in results.iter().enumerate() {
+        if index > 0 {
+            body.push(',');
+        }
+
+        body.push('{');
+        push_json_string_field_string(&mut body, "ssid", network.ssid.as_str());
+        body.push_str(",\"bssid\":");
+        push_json_string_string(&mut body, &mac_address_string(network.bssid));
+        body.push_str(",\"auth_mode\":");
+        push_json_string_string(&mut body, wifi_auth_mode_label(network.auth_method));
+        body.push_str(",\"rssi\":");
+        append_i32(&mut body, i32::from(network.signal_strength));
+        body.push_str(",\"channel\":");
+        append_u32(&mut body, u32::from(network.channel));
+        body.push_str(",\"open\":");
+        body.push_str(if matches!(network.auth_method, Some(WifiAuthenticationMethod::None)) {
+            "true"
+        } else {
+            "false"
+        });
+        body.push('}');
+    }
+
+    body.push_str("]}");
+    body
+}
+
+fn wifi_auth_mode_label(auth_method: Option<WifiAuthenticationMethod>) -> &'static str {
+    match auth_method {
+        Some(WifiAuthenticationMethod::None) => "OPEN",
+        Some(WifiAuthenticationMethod::Wep) => "WEP",
+        Some(WifiAuthenticationMethod::Wpa) => "WPA_PSK",
+        Some(WifiAuthenticationMethod::Wpa2Personal) => "WPA2_PSK",
+        Some(WifiAuthenticationMethod::WpaWpa2Personal) => "WPA_WPA2_PSK",
+        Some(WifiAuthenticationMethod::Wpa2Enterprise) => "WPA2_ENTERPRISE",
+        Some(WifiAuthenticationMethod::Wpa3Personal) => "WPA3_PSK",
+        Some(WifiAuthenticationMethod::Wpa2Wpa3Personal) => "WPA2_WPA3_PSK",
+        Some(WifiAuthenticationMethod::WapiPersonal) => "WAPI_PSK",
+        _ => "UNKNOWN",
+    }
+}
+
+fn format_wifi_error_token(err: &radio_wifi::WifiError) -> &'static str {
+    match err {
+        radio_wifi::WifiError::Disconnected(_) => "disconnected",
+        radio_wifi::WifiError::Unsupported => "unsupported",
+        radio_wifi::WifiError::InvalidArguments => "invalid_arguments",
+        radio_wifi::WifiError::Failed => "failed",
+        radio_wifi::WifiError::OutOfMemory => "out_of_memory",
+        radio_wifi::WifiError::InvalidSsid => "invalid_ssid",
+        radio_wifi::WifiError::InvalidPassword => "invalid_password",
+        radio_wifi::WifiError::NotConnected => "not_connected",
+        _ => "unknown",
+    }
+}
+
+fn push_json_string_field_string(payload: &mut String, key: &str, value: &str) {
+    payload.push('"');
+    payload.push_str(key);
+    payload.push_str("\":");
+    push_json_string_string(payload, value);
+}
+
+fn push_json_string_string(payload: &mut String, value: &str) {
+    payload.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => payload.push_str("\\\\"),
+            '"' => payload.push_str("\\\""),
+            '\n' => payload.push_str("\\n"),
+            '\r' => payload.push_str("\\r"),
+            '\t' => payload.push_str("\\t"),
+            _ => payload.push(ch),
+        }
+    }
+    payload.push('"');
 }
 
 fn open_settings_nvs(flash: esp_hal::peripherals::FLASH<'static>) -> Result<SettingsNvs, ()> {

@@ -28,7 +28,7 @@ That means the latest live sample showed symmetric peer visibility on both MQTT 
 | `ha_ws_config:` | Persists WS settings | Persists WS settings | Full | Command parsing + persistence path | Transport use remains limited by MQTT websocket support |
 | `ha_mqtt_endpoint:` | Persists endpoint/transport settings | Persists endpoint/transport settings | Full | Command parsing + live TCP MQTT path | Websocket endpoint config stores correctly |
 | `tuning_config:` | Persists tuning and LED values | Persists tuning and LED values | Full | Existing parser/runtime tests | Included in runtime benchmark contract |
-| `wifi_scan` | Emits scan results | Parses command but returns snapshot | Partial | Code read only | No scan result parity yet |
+| `wifi_scan` | Emits scan results | Returns `wifi_scan_results` JSON with live AP scan data | Full | Live HTTP command on Rust node | Payload now mirrors the C++ scan result shape over the HTTP command surface |
 | `ha_room_pose_publish:` | Publishes pose command/event | Publishes MQTT pose command/event | Full | Live HTTP command to Rust updated C++ snapshot pose | Rust now mirrors the C++ MQTT pose-command behavior |
 | `ble_tag_config:` | Configures BLE slots | Parses command but returns snapshot | Partial | Code read only | BLE stack not implemented in Rust |
 | `ble_tag_clear:` | Clears BLE slots | Parses command but returns snapshot | Partial | Code read only | BLE stack not implemented in Rust |
@@ -82,6 +82,7 @@ That means the latest live sample showed symmetric peer visibility on both MQTT 
 | MQTT room summary parser benchmark | Not separately isolated | Isolated in core benchmark | Full | `mqtt_room_summary_publish_parse` benchmark runs at ~212.61-221.03 ns on `x86_64-pc-windows-msvc` |
 | Firmware compile validation | PlatformIO | `cargo +esp check` | Full | Rust firmware compiles after parser extraction |
 | Live Rust HTTP snapshot | N/A | Active | Full | `10.0.107.148/api/snapshot` returns good data |
+| Live Wi-Fi scan command | Emits `wifi_scan_results` payload | Emits `wifi_scan_results` payload | Full | Live HTTP command on `10.0.107.148` returned 8 APs and the board remained connected |
 | Live multi-node room fusion | Active | Restored and currently symmetric | Partial | Latest live snapshots showed both nodes with `room_peers=1`; longer burn-in still needed |
 | Live multi-node UDP discovery | Active | Restored and currently symmetric | Partial | Latest live snapshots showed both nodes with `udp_discovery.peer_count=1`; longer burn-in still needed |
 
@@ -90,7 +91,7 @@ That means the latest live sample showed symmetric peer visibility on both MQTT 
 1. Burn in symmetric room-summary and UDP peer retention over a longer live window before upgrading those rows from `Partial` to `Full`.
 2. Implement actual OTA download/apply behavior behind `firmware_sync` / `firmware_update`.
 3. Implement BLE beacon/tag observation and command handling instead of placeholder zero/empty snapshot fields.
-4. Implement real `wifi_scan` command behavior in Rust.
+4. Keep closing the remaining BLE and OTA command/runtime gaps.
 
 ## Notes
 
