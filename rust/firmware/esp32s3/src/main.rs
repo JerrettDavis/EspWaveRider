@@ -22,7 +22,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata as UdpPacketMetadata, UdpSocket};
 use embassy_executor::Spawner;
 use embassy_futures::{
-    select::{select, Either},
+    select::{select, select3, Either, Either3},
     yield_now,
 };
 use embassy_sync::{
@@ -30,7 +30,7 @@ use embassy_sync::{
     channel::Channel as SyncChannel,
     mutex::Mutex,
 };
-use embassy_time::{Duration, with_timeout};
+use embassy_time::{Duration, Timer, with_timeout};
 use esp_alloc as _;
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::partitions::{
@@ -1883,6 +1883,10 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
 
         loop {
             while let Some(packet) = take_mqtt_packet(&mut inbound) {
+                if mqtt_is_pingresp_packet(packet.as_slice()) {
+                    continue;
+                }
+
                 if let Some(summary) = mqtt_room_summary_payload_from_publish(packet.as_slice()) {
                     let mut event_payload = heapless::String::<512>::new();
                     if event_payload.push_str(summary).is_ok() {
@@ -1893,9 +1897,12 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
 
             let wait_for_read = socket.wait_read_ready();
             let wait_for_command = MQTT_COMMAND_CHANNEL.receive();
+            let wait_for_keepalive = Timer::after(Duration::from_secs(u64::from(
+                MQTT_KEEPALIVE_SECS.saturating_div(2).max(1),
+            )));
 
-            match select(wait_for_read, wait_for_command).await {
-                Either::First(()) => {
+            match select3(wait_for_read, wait_for_command, wait_for_keepalive).await {
+                Either3::First(()) => {
                     let Ok(size) = socket.read(&mut read_buffer).await else {
                         break;
                     };
@@ -1903,7 +1910,7 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
                         break;
                     }
                 }
-                Either::Second(command) => match command {
+                Either3::Second(command) => match command {
                     MqttTaskCommand::Configure(next) => {
                         if next != config {
                             config = next;
@@ -1916,6 +1923,11 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
                         }
                     }
                 },
+                Either3::Third(()) => {
+                    if mqtt_send_pingreq(&mut socket).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
 
@@ -2042,18 +2054,39 @@ async fn serve_http_connections(
                 socket.close();
                 continue;
             }
-            Ok(HttpRoute::Snapshot) => match request_http_response(HttpRequestMessage::Snapshot).await
-            {
-                Ok(body) => http_response("200 OK", "application/json", &body),
-                Err(body) => http_response("500 Internal Server Error", "application/json", &body),
-            },
+            Ok(HttpRoute::Snapshot) => {
+                let (status, body) = match request_http_response(HttpRequestMessage::Snapshot).await {
+                    Ok(body) => ("200 OK", body),
+                    Err(body) => ("500 Internal Server Error", body),
+                };
+                let _ = send_http_response_header(
+                    &mut socket,
+                    status,
+                    "application/json",
+                    body.len(),
+                )
+                .await;
+                let _ = send_http_body_chunks(&mut socket, body.as_bytes()).await;
+                let _ = socket.flush().await;
+                socket.close();
+                continue;
+            }
             Ok(HttpRoute::Command(command)) => {
-                match request_http_response(HttpRequestMessage::Command(command)).await {
-                    Ok(body) => http_response("200 OK", "application/json", &body),
-                    Err(body) => {
-                        http_response("500 Internal Server Error", "application/json", &body)
-                    }
-                }
+                let (status, body) = match request_http_response(HttpRequestMessage::Command(command)).await {
+                    Ok(body) => ("200 OK", body),
+                    Err(body) => ("500 Internal Server Error", body),
+                };
+                let _ = send_http_response_header(
+                    &mut socket,
+                    status,
+                    "application/json",
+                    body.len(),
+                )
+                .await;
+                let _ = send_http_body_chunks(&mut socket, body.as_bytes()).await;
+                let _ = socket.flush().await;
+                socket.close();
+                continue;
             }
             Err(response) => response,
         };
@@ -2189,9 +2222,9 @@ async fn main(spawner: Spawner) {
                 }
                 _ => {}
             }
-        } else {
-            yield_now().await;
         }
+
+        yield_now().await;
     }
 }
 
@@ -2778,6 +2811,12 @@ fn build_mqtt_publish_packet(
     Some(packet)
 }
 
+fn build_mqtt_pingreq_packet() -> heapless::Vec<u8, 2> {
+    let mut packet = heapless::Vec::<u8, 2>::new();
+    let _ = packet.extend_from_slice(&[0xC0, 0x00]);
+    packet
+}
+
 fn build_room_summary_publish_message(
     state: &FirmwareState,
     payload: heapless::String<384>,
@@ -2888,6 +2927,16 @@ async fn mqtt_send_publish_message(
         .ok_or(())?;
     socket_write_all(socket, packet.as_slice()).await?;
     socket.flush().await.map_err(|_| ())
+}
+
+async fn mqtt_send_pingreq(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
+    let packet = build_mqtt_pingreq_packet();
+    socket_write_all(socket, packet.as_slice()).await?;
+    socket.flush().await.map_err(|_| ())
+}
+
+fn mqtt_is_pingresp_packet(packet: &[u8]) -> bool {
+    packet.len() == 2 && packet[0] == 0xD0 && packet[1] == 0x00
 }
 
 fn mqtt_packet_length(buffer: &[u8]) -> Result<Option<usize>, ()> {
