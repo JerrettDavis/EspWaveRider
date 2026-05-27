@@ -1,0 +1,33 @@
+[package]
+name = "espwaverider-esp32s3"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+device-benchmarks = []
+usb-console = []
+
+[dependencies]
+embassy-executor = "0.10"
+embassy-futures = "0.1.2"
+embassy-net = { version = "0.7", default-features = false, features = ["udp", "tcp", "dhcpv4", "medium-ethernet"] }
+embassy-sync = "0.7.2"
+embassy-time = "0.5.1"
+embedded-storage = "0.3.1"
+esp-alloc = "0.10.0"
+esp-backtrace = { version = "0.19.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
+esp-hal = { version = "1.1.1", features = ["esp32s3", "unstable"] }
+esp-nvs = { version = "0.4.0", features = ["esp32s3"] }
+esp-println = { version = "0.17.0", default-features = false, features = ["esp32s3", "no-op"] }
+esp-radio = { version = "0.18.0", features = ["esp32s3", "wifi", "unstable", "esp-alloc", "xtensa-lx-rt"] }
+esp-rtos = { version = "0.3.0", features = ["esp32s3", "esp-radio", "esp-alloc", "embassy"] }
+esp-storage = { version = "0.9.0", features = ["esp32s3"] }
+espwaverider-core = { path = "../../crates/espwaverider-core", default-features = false, features = ["snapshot-contract"] }
+heapless = "0.8"
+smoltcp = { version = "0.12.0", default-features = false, features = ["medium-ethernet", "proto-ipv4"] }
+static_cell = "2"

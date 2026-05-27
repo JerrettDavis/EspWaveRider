@@ -8,5 +8,7 @@
   href: operations.md
 - name: HTTP And Commands
   href: api.md
+- name: Parity Matrix
+  href: parity-matrix.md
 - name: Testing And Releases
   href: testing-and-release.md

@@ -1,0 +1,22 @@
+[package]
+name = "espwaverider-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["snapshot-contract"]
+snapshot-contract = ["dep:serde", "dep:serde_json"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"], optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "parity_bench"
+harness = false
