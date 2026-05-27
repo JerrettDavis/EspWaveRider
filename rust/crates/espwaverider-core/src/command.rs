@@ -45,6 +45,19 @@ pub struct RoomPosePublishPayload<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BleTagConfigPayload<'a> {
+    pub slot: u8,
+    pub label: &'a str,
+    pub address: &'a str,
+    pub min_rssi: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BleTagClearPayload {
+    pub slot: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuningConfigPayload {
     pub max_detection_range_cm: u16,
     pub min_gate_energy: u16,
@@ -218,6 +231,20 @@ impl<'a> DeviceCommand<'a> {
             _ => Err(CommandPayloadParseError::new("command is not tuning_config")),
         }
     }
+
+    pub fn ble_tag_config_payload(&self) -> Result<BleTagConfigPayload<'a>, CommandPayloadParseError> {
+        match self {
+            DeviceCommand::BleTagConfig(payload) => parse_ble_tag_config_payload(payload),
+            _ => Err(CommandPayloadParseError::new("command is not ble_tag_config")),
+        }
+    }
+
+    pub fn ble_tag_clear_payload(&self) -> Result<BleTagClearPayload, CommandPayloadParseError> {
+        match self {
+            DeviceCommand::BleTagClear(payload) => parse_ble_tag_clear_payload(payload),
+            _ => Err(CommandPayloadParseError::new("command is not ble_tag_clear")),
+        }
+    }
 }
 
 pub fn parse_home_assistant_config_payload(
@@ -334,6 +361,31 @@ pub fn parse_home_assistant_mqtt_endpoint_payload(
     })
 }
 
+pub fn parse_ble_tag_config_payload(
+    payload: &str,
+) -> Result<BleTagConfigPayload<'_>, CommandPayloadParseError> {
+    let fields = split_fields::<4>(payload)?;
+    let slot = parse_u8(fields[0], "invalid ble tag slot")?;
+    let parsed_min_rssi = if fields[3].is_empty() {
+        -88
+    } else {
+        parse_i32(fields[3], "invalid ble tag min rssi")?
+    };
+
+    Ok(BleTagConfigPayload {
+        slot,
+        label: fields[1],
+        address: fields[2],
+        min_rssi: clamp_i32(parsed_min_rssi, -120, -20),
+    })
+}
+
+pub fn parse_ble_tag_clear_payload(payload: &str) -> Result<BleTagClearPayload, CommandPayloadParseError> {
+    Ok(BleTagClearPayload {
+        slot: parse_u8(payload, "invalid ble tag slot")?,
+    })
+}
+
 fn split_fields<const N: usize>(payload: &str) -> Result<[&str; N], CommandPayloadParseError> {
     let fields: Vec<&str> = payload.split('|').collect();
     if fields.len() != N {
@@ -352,6 +404,18 @@ fn parse_bool_token(token: &str) -> bool {
 fn parse_i16(value: &str, message: &'static str) -> Result<i16, CommandPayloadParseError> {
     value
         .parse::<i16>()
+        .map_err(|_| CommandPayloadParseError::new(message))
+}
+
+fn parse_i32(value: &str, message: &'static str) -> Result<i32, CommandPayloadParseError> {
+    value
+        .parse::<i32>()
+        .map_err(|_| CommandPayloadParseError::new(message))
+}
+
+fn parse_u8(value: &str, message: &'static str) -> Result<u8, CommandPayloadParseError> {
+    value
+        .parse::<u8>()
         .map_err(|_| CommandPayloadParseError::new(message))
 }
 
@@ -439,6 +503,14 @@ mod tests {
             Ok(DeviceCommand::HomeAssistantRoomPosePublish(
                 "node-2|room-default|auto|50|25|-90|800|400"
             ))
+        );
+        assert_eq!(
+            parse_device_command("ble_tag_config:2|Badge|AA:BB:CC:DD:EE:FF|-70"),
+            Ok(DeviceCommand::BleTagConfig("2|Badge|AA:BB:CC:DD:EE:FF|-70"))
+        );
+        assert_eq!(
+            parse_device_command("ble_tag_clear:2"),
+            Ok(DeviceCommand::BleTagClear("2"))
         );
     }
 
@@ -529,6 +601,54 @@ mod tests {
                 heading_deg: -90,
                 room_width_cm: 800,
                 room_height_cm: 400,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_typed_ble_tag_config_payload() {
+        let command = parse_device_command("ble_tag_config:2|Badge|AA:BB:CC:DD:EE:FF|-70").unwrap();
+
+        assert_eq!(
+            command.ble_tag_config_payload().unwrap(),
+            BleTagConfigPayload {
+                slot: 2,
+                label: "Badge",
+                address: "AA:BB:CC:DD:EE:FF",
+                min_rssi: -70,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_typed_ble_tag_clear_payload() {
+        let command = parse_device_command("ble_tag_clear:2").unwrap();
+
+        assert_eq!(
+            command.ble_tag_clear_payload().unwrap(),
+            BleTagClearPayload { slot: 2 }
+        );
+    }
+
+    #[test]
+    fn applies_ble_tag_default_min_rssi_and_clamps() {
+        assert_eq!(
+            parse_ble_tag_config_payload("2|Badge|AA:BB:CC:DD:EE:FF|").unwrap(),
+            BleTagConfigPayload {
+                slot: 2,
+                label: "Badge",
+                address: "AA:BB:CC:DD:EE:FF",
+                min_rssi: -88,
+            }
+        );
+
+        assert_eq!(
+            parse_ble_tag_config_payload("2|Badge|AA:BB:CC:DD:EE:FF|-200").unwrap(),
+            BleTagConfigPayload {
+                slot: 2,
+                label: "Badge",
+                address: "AA:BB:CC:DD:EE:FF",
+                min_rssi: -120,
             }
         );
     }

@@ -91,10 +91,11 @@ pub struct BleBeaconSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BleTagSnapshot {
+    pub slot: Option<u8>,
     pub label: Option<String>,
     pub address: Option<String>,
     pub min_rssi: Option<i32>,
-    pub last_rssi: Option<i32>,
+    pub rssi: Option<i32>,
     pub age_ms: Option<u32>,
     pub present: Option<bool>,
 }

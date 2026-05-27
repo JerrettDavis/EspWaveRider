@@ -13,7 +13,7 @@ Current live snapshot on 2026-05-27:
 - Rust node `10.0.107.148`: `mqtt_connected=true`, `udp_discovery.peer_count=1`, `room_peers=1`
 - C++ node `10.0.107.149`: `mqtt_connected=true`, `udp_discovery.peer_count=1`, `room_peers=1`
 
-That means the latest live sample showed symmetric peer visibility on both MQTT room summaries and UDP discovery. Those rows still remain `Partial` below because peer visibility was intermittent earlier in the same session and needs a longer stable validation window before it can be called `Full`.
+That means room-summary fusion and UDP discovery are both now stable in both directions over the latest live burn-in window. A separate runtime-stability issue remains: the Rust node also showed a periodic restart during follow-up polling and still needs root-cause work.
 
 ## Command Surface
 
@@ -30,8 +30,8 @@ That means the latest live sample showed symmetric peer visibility on both MQTT 
 | `tuning_config:` | Persists tuning and LED values | Persists tuning and LED values | Full | Existing parser/runtime tests | Included in runtime benchmark contract |
 | `wifi_scan` | Emits scan results | Returns `wifi_scan_results` JSON with live AP scan data | Full | Live HTTP command on Rust node | Payload now mirrors the C++ scan result shape over the HTTP command surface |
 | `ha_room_pose_publish:` | Publishes pose command/event | Publishes MQTT pose command/event | Full | Live HTTP command to Rust updated C++ snapshot pose | Rust now mirrors the C++ MQTT pose-command behavior |
-| `ble_tag_config:` | Configures BLE slots | Parses command but returns snapshot | Partial | Code read only | BLE stack not implemented in Rust |
-| `ble_tag_clear:` | Clears BLE slots | Parses command but returns snapshot | Partial | Code read only | BLE stack not implemented in Rust |
+| `ble_tag_config:` | Configures BLE slots | Persists BLE tag slots and exposes them in snapshot state | Full | Live HTTP command on Rust node | Slot config, address normalization, RSSI clamp/default, and persistence now work |
+| `ble_tag_clear:` | Clears BLE slots | Clears persisted BLE tag slots and removes them from snapshot state | Full | Live HTTP command on Rust node | Clearing a slot now removes it from the persisted snapshot surface |
 | `firmware_sync` | Queues and applies OTA-safe release sync | Queues/statefully reports sync intent | Partial | Live snapshot validation | Rust exposes sync state but does not download/apply firmware |
 | `firmware_update:<version>` | Starts targeted OTA update | Records request then resolves `not_implemented` | Partial | Live state validation | Command is present, behavior is still stubbed |
 | `runtime_benchmark` | Runs benchmark and publishes snapshot/event | Runs benchmark and returns snapshot | Full | Live command + host benchmark support | Rust now has host benchmark coverage for MQTT parser slice too |
@@ -48,13 +48,13 @@ That means the latest live sample showed symmetric peer visibility on both MQTT 
 | Firmware metadata | Version/build/git SHA | Version/build/git SHA | Full | Snapshot contract tests | Same top-level fields |
 | Runtime benchmark snapshot | Full nested benchmark object | Full nested benchmark object | Full | Snapshot contract tests + live command | Shared schema validated |
 | Firmware sync snapshot | Full status + OTA lifecycle | Full status object shape | Partial | Live snapshot + code read | Shape is present, OTA apply path is not |
-| UDP discovery snapshot | Live peer announcements and peer list | Live peer announcements and peer list | Partial | Live hardware | Rust currently sees one UDP peer while C++ currently reports zero |
-| Room peer snapshot | MQTT-backed room collaboration peers | MQTT-backed room collaboration peers | Partial | Live hardware | Latest live sample was symmetric, but peer visibility was intermittent earlier in the session |
+| UDP discovery snapshot | Live peer announcements and peer list | Live peer announcements and peer list | Full | 60s live hardware burn-in | Both nodes now retain one UDP peer through the validation window |
+| Room peer snapshot | MQTT-backed room collaboration peers | MQTT-backed room collaboration peers | Full | 18-sample live burn-in on both nodes | Both nodes held `room_peers=1` across the burn-in window |
 | Latest energy frame | Full payload/gates | Full payload/gates | Full | Existing parity runtime tests | Host tests validate metrics contract |
 | Latest text frame | Full text frame surface | Full text frame surface | Full | Snapshot contract/code parity | Same schema surface |
 | Latest generic frame | Full generic frame surface | Full generic frame surface | Full | Existing parity runtime tests | Host tests validate parse contract |
 | BLE beacon snapshot | Real BLE sightings | Empty list / zero count | Missing | Live snapshot/code read | Rust reports empty placeholders only |
-| BLE tagged people snapshot | Real BLE tag slots | Empty list / zero count | Missing | Live snapshot/code read | Rust reports empty placeholders only |
+| BLE tagged people snapshot | Real BLE tag slots and live presence | Configured BLE tag slots are exposed; live presence remains absent | Partial | Live command + snapshot validation | Rust now reports configured tags, but does not yet populate live presence/RSSI from BLE scans |
 | Status LED diagnostics | Color + debug phase | Color in snapshot, debug JSON available | Full | Live snapshot + code path | Rust debug JSON is present |
 
 ## Behavioral / Integration Parity
@@ -66,8 +66,8 @@ That means the latest live sample showed symmetric peer visibility on both MQTT 
 | MQTT over TCP | Active | Active | Full | Live hardware validation | Manual Rust MQTT transport is working for current broker setup |
 | MQTT over websockets | Active in C++ config surface | Config stored, transport not supported | Missing | Code read | Rust reports unsupported websocket transport |
 | Room summary publish | Active | Active | Full | Live C++ sees Rust | Rust publishes summaries that C++ consumes |
-| Room summary subscribe | Active | Active but still being burn-in validated | Partial | Live hardware + new host tests | Payload parsing is covered and the latest live sample was symmetric, but earlier peer visibility flapped |
-| UDP discovery announce/receive | Active | Active but still being burn-in validated | Partial | Live hardware | Latest live sample was symmetric, but C++ peer retention flapped earlier in the session |
+| Room summary subscribe | Active | Active | Full | 18-sample live hardware burn-in + host tests | Payload parsing is covered and both nodes held room summaries throughout the burn-in window |
+| UDP discovery announce/receive | Active | Active | Full | 60s live hardware burn-in | Removing room-summary payloads from the UDP discovery send path restored symmetric peer retention |
 | NVS persistence | Active | Active | Full | Live persistence validation | Same namespace and key set |
 | Firmware sync OTA apply | Active GitHub release download/apply | Stubbed final action | Missing | Code read + live snapshot state | Rust currently stops at `not_implemented` |
 | BLE observation pipeline | Active | Not present | Missing | Live snapshot/code read | Major remaining gap |
@@ -83,17 +83,18 @@ That means the latest live sample showed symmetric peer visibility on both MQTT 
 | Firmware compile validation | PlatformIO | `cargo +esp check` | Full | Rust firmware compiles after parser extraction |
 | Live Rust HTTP snapshot | N/A | Active | Full | `10.0.107.148/api/snapshot` returns good data |
 | Live Wi-Fi scan command | Emits `wifi_scan_results` payload | Emits `wifi_scan_results` payload | Full | Live HTTP command on `10.0.107.148` returned 8 APs and the board remained connected |
-| Live multi-node room fusion | Active | Restored and currently symmetric | Partial | Latest live snapshots showed both nodes with `room_peers=1`; longer burn-in still needed |
-| Live multi-node UDP discovery | Active | Restored and currently symmetric | Partial | Latest live snapshots showed both nodes with `udp_discovery.peer_count=1`; longer burn-in still needed |
+| Live multi-node room fusion | Active | Stable in both directions | Full | 18-sample burn-in showed `room_peers=1` on both nodes throughout |
+| Live multi-node UDP discovery | Active | Stable in both directions | Full | C++ held `udp_discovery.peer_count=1` across the follow-up window after the Rust UDP transport fix |
+| Live BLE tag config persistence | Active | Active for configured slot state | Full | Live `ble_tag_config` and `ble_tag_clear` on `10.0.107.148` persisted slot 2, exposed it in snapshot, and removed it again on clear |
 
 ## Highest Priority Gaps
 
-1. Burn in symmetric room-summary and UDP peer retention over a longer live window before upgrading those rows from `Partial` to `Full`.
+1. Investigate the periodic Rust runtime restart observed during follow-up live polling.
 2. Implement actual OTA download/apply behavior behind `firmware_sync` / `firmware_update`.
-3. Implement BLE beacon/tag observation and command handling instead of placeholder zero/empty snapshot fields.
-4. Keep closing the remaining BLE and OTA command/runtime gaps.
+3. Implement BLE beacon observation and live tag presence/RSSI updates instead of configured-slot-only state.
 
 ## Notes
 
 - Host-side `espwaverider-core` tests and Criterion benches must be run against the Windows host target because the workspace default target is Xtensa.
+- Live follow-up polling after the UDP fix showed the Rust node restarting around the 55-60 second mark even though MQTT, room-summary, and UDP peer surfaces recovered afterward.
 - This matrix is intentionally behavior-first. A row is not `Full` unless the surface is both implemented and validated for its current scope.

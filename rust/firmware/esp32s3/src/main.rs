@@ -65,7 +65,7 @@ use esp_storage::FlashStorage;
 use espwaverider_core::{
     board::{PresencePinMode, ESP32_S3_DEVKITM_1},
     command::{
-        parse_device_command, DeviceCommand, HomeAssistantConfigPayload,
+        parse_device_command, BleTagClearPayload, BleTagConfigPayload, DeviceCommand, HomeAssistantConfigPayload,
         HomeAssistantMqttEndpointPayload, HomeAssistantWebSocketConfigPayload,
         RoomConfigPayload, RoomPosePublishPayload, TuningConfigPayload,
     },
@@ -154,6 +154,9 @@ const SETTINGS_KEY_MIN_GATES: Key = Key::from_str("min_gates");
 const SETTINGS_KEY_MIN_ACT: Key = Key::from_str("min_act");
 const SETTINGS_KEY_LED_ON: Key = Key::from_str("led_on");
 const SETTINGS_KEY_LED_BRI: Key = Key::from_str("led_bri");
+const MAX_BLE_TAGS: usize = 8;
+const BLE_TAG_FRESHNESS_MS: u32 = 45_000;
+const BLE_TAG_DEFAULT_MIN_RSSI: i32 = -88;
 const DEFAULT_AP_NETMASK: Ipv4Address = Ipv4Address::new(255, 255, 255, 0);
 const DEFAULT_AP_GATEWAY: Ipv4Address = Ipv4Address::new(192, 168, 4, 1);
 const DEFAULT_DHCP_LEASE_SECS: u32 = 86_400;
@@ -547,6 +550,17 @@ struct FirmwareState {
     firmware_sync_state: FirmwareSyncState,
     last_udp_discovery_announce_ms: u32,
     udp_discovery_peers: Vec<UdpDiscoveryPeerState>,
+    ble_identity_tags: Vec<BleIdentityTagState>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BleIdentityTagState {
+    occupied: bool,
+    label: String,
+    address: String,
+    min_rssi: i32,
+    last_rssi: i32,
+    last_seen_ms: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -646,6 +660,7 @@ impl Default for FirmwareState {
             firmware_sync_state: FirmwareSyncState::default(),
             last_udp_discovery_announce_ms: 0,
             udp_discovery_peers: Vec::new(),
+            ble_identity_tags: default_ble_identity_tags(),
         }
     }
 }
@@ -1454,6 +1469,36 @@ impl FirmwareState {
         self.led_brightness = payload.led_brightness;
     }
 
+    fn apply_ble_tag_config(&mut self, payload: BleTagConfigPayload<'_>) -> bool {
+        let slot = usize::from(payload.slot);
+        if slot >= self.ble_identity_tags.len() {
+            return false;
+        }
+
+        let tag = &mut self.ble_identity_tags[slot];
+        tag.label = String::from(payload.label);
+        tag.address = normalize_ble_identity_value(payload.address);
+        tag.min_rssi = payload.min_rssi.clamp(-120, -20);
+        tag.last_rssi = -127;
+        tag.last_seen_ms = 0;
+        tag.occupied = !tag.label.is_empty() && !tag.address.is_empty();
+        if !tag.occupied {
+            clear_ble_identity_tag(tag);
+        }
+
+        true
+    }
+
+    fn apply_ble_tag_clear(&mut self, payload: BleTagClearPayload) -> bool {
+        let slot = usize::from(payload.slot);
+        if slot >= self.ble_identity_tags.len() {
+            return false;
+        }
+
+        clear_ble_identity_tag(&mut self.ble_identity_tags[slot]);
+        true
+    }
+
     fn apply_radar_frame(&mut self, frame: RadarFrame) {
         self.radar_frames_total = self.radar_frames_total.saturating_add(1);
 
@@ -1640,12 +1685,46 @@ impl FirmwareState {
             room_peers: self.active_room_peers(uptime_ms),
             ble_beacon_count: 0,
             ble_beacons: alloc::vec::Vec::<BleBeaconSnapshot>::new(),
-            ble_tagged_people_count: 0,
-            ble_tags: alloc::vec::Vec::<BleTagSnapshot>::new(),
+            ble_tagged_people_count: self.active_ble_tag_count(uptime_ms),
+            ble_tags: self.ble_tag_snapshots(uptime_ms),
             latest_energy_frame: self.latest_energy_frame.clone(),
             latest_text_frame: self.latest_text_frame.clone(),
             latest_generic_frame: self.latest_generic_frame.clone(),
         }
+    }
+
+    fn active_ble_tag_count(&self, uptime_ms: u32) -> u16 {
+        self.ble_identity_tags
+            .iter()
+            .filter(|tag| ble_identity_tag_present(tag, uptime_ms))
+            .count()
+            .min(u16::MAX as usize) as u16
+    }
+
+    fn ble_tag_snapshots(&self, uptime_ms: u32) -> Vec<BleTagSnapshot> {
+        self.ble_identity_tags
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, tag)| {
+                if !tag.occupied {
+                    return None;
+                }
+
+                Some(BleTagSnapshot {
+                    slot: Some(slot.min(u8::MAX as usize) as u8),
+                    label: Some(tag.label.clone()),
+                    address: Some(tag.address.clone()),
+                    min_rssi: Some(tag.min_rssi),
+                    rssi: Some(tag.last_rssi),
+                    age_ms: Some(if tag.last_seen_ms > 0 {
+                        uptime_ms.saturating_sub(tag.last_seen_ms)
+                    } else {
+                        BLE_TAG_FRESHNESS_MS.saturating_add(1)
+                    }),
+                    present: Some(ble_identity_tag_present(tag, uptime_ms)),
+                })
+            })
+            .collect()
     }
 }
 
@@ -2462,10 +2541,6 @@ fn process_udp_discovery(state: &mut FirmwareState, station_stack: Option<NetSta
                 state.last_udp_discovery_announce_ms = uptime_ms;
             }
         }
-    }
-
-    if let Some(payload) = build_room_summary_payload(state, uptime_ms) {
-        let _ = UDP_DISCOVERY_ANNOUNCE_CHANNEL.try_send(payload);
     }
 
     while let Ok(payload) = UDP_DISCOVERY_PACKET_CHANNEL.try_receive() {
@@ -3449,8 +3524,7 @@ async fn handle_command(
         Ok(DeviceCommand::Ping)
         | Ok(DeviceCommand::Status)
         | Ok(DeviceCommand::HomeAssistantStatus)
-        | Ok(DeviceCommand::BleTagConfig(_))
-        | Ok(DeviceCommand::BleTagClear(_)) => state.snapshot_json(uptime_ms(boot_started)),
+        => state.snapshot_json(uptime_ms(boot_started)),
         Ok(DeviceCommand::WifiScan) => build_wifi_scan_results_json(wifi_controller).await,
         Ok(home_assistant_command @ DeviceCommand::HomeAssistantConfig(_)) => {
             match home_assistant_command.home_assistant_config_payload() {
@@ -3500,6 +3574,32 @@ async fn handle_command(
                     state.snapshot_json(uptime_ms(boot_started))
                 }
                 Err(_) => String::from(r#"{"error":"invalid_tuning_config"}"#),
+            }
+        }
+        Ok(ble_tag_command @ DeviceCommand::BleTagConfig(_)) => {
+            match ble_tag_command.ble_tag_config_payload() {
+                Ok(payload) => {
+                    if state.apply_ble_tag_config(payload) {
+                        persist_runtime_config(settings.as_deref_mut(), state);
+                        state.snapshot_json(uptime_ms(boot_started))
+                    } else {
+                        String::from(r#"{"error":"invalid_ble_tag_slot"}"#)
+                    }
+                }
+                Err(_) => String::from(r#"{"error":"invalid_ble_tag_config"}"#),
+            }
+        }
+        Ok(ble_tag_clear_command @ DeviceCommand::BleTagClear(_)) => {
+            match ble_tag_clear_command.ble_tag_clear_payload() {
+                Ok(payload) => {
+                    if state.apply_ble_tag_clear(payload) {
+                        persist_runtime_config(settings.as_deref_mut(), state);
+                        state.snapshot_json(uptime_ms(boot_started))
+                    } else {
+                        String::from(r#"{"error":"invalid_ble_tag_slot"}"#)
+                    }
+                }
+                Err(_) => String::from(r#"{"error":"invalid_ble_tag_slot"}"#),
             }
         }
         Ok(DeviceCommand::FirmwareSync) => {
@@ -3751,6 +3851,36 @@ fn load_persisted_config(state: &mut FirmwareState, settings: &mut SettingsNvs) 
         state.led_brightness = value.max(1);
     }
 
+    for slot in 0..MAX_BLE_TAGS {
+        let (label_key, address_key, rssi_key) = ble_tag_key_strings(slot);
+        let label_key = Key::from_str(label_key.as_str());
+        let address_key = Key::from_str(address_key.as_str());
+        let rssi_key = Key::from_str(rssi_key.as_str());
+
+        let label = settings
+            .get::<String>(&SETTINGS_NAMESPACE, &label_key)
+            .unwrap_or_default();
+        let address = settings
+            .get::<String>(&SETTINGS_NAMESPACE, &address_key)
+            .map(|value| normalize_ble_identity_value(&value))
+            .unwrap_or_default();
+        let min_rssi = settings
+            .get::<i32>(&SETTINGS_NAMESPACE, &rssi_key)
+            .unwrap_or(BLE_TAG_DEFAULT_MIN_RSSI)
+            .clamp(-120, -20);
+
+        let tag = &mut state.ble_identity_tags[slot];
+        tag.label = label;
+        tag.address = address;
+        tag.min_rssi = min_rssi;
+        tag.last_rssi = -127;
+        tag.last_seen_ms = 0;
+        tag.occupied = !tag.label.is_empty() && !tag.address.is_empty();
+        if !tag.occupied {
+            clear_ble_identity_tag(tag);
+        }
+    }
+
     state.wifi_reconfigure_pending = state.home_assistant_configured();
     if !state.home_assistant_configured() {
         state.mark_wifi_disconnected(DEFAULT_WIFI_NOT_CONFIGURED_REASON_TEXT);
@@ -3790,6 +3920,85 @@ fn persist_runtime_config(settings: Option<&mut SettingsNvs>, state: &FirmwareSt
     let _ = settings.set(&SETTINGS_NAMESPACE, &SETTINGS_KEY_MIN_ACT, state.min_activity_score);
     let _ = settings.set(&SETTINGS_NAMESPACE, &SETTINGS_KEY_LED_ON, state.led_enabled);
     let _ = settings.set(&SETTINGS_NAMESPACE, &SETTINGS_KEY_LED_BRI, state.led_brightness);
+
+    for (slot, tag) in state.ble_identity_tags.iter().enumerate() {
+        let (label_key, address_key, rssi_key) = ble_tag_key_strings(slot);
+        let label_key = Key::from_str(label_key.as_str());
+        let address_key = Key::from_str(address_key.as_str());
+        let rssi_key = Key::from_str(rssi_key.as_str());
+
+        let _ = settings.set(
+            &SETTINGS_NAMESPACE,
+            &label_key,
+            if tag.occupied { tag.label.as_str() } else { "" },
+        );
+        let _ = settings.set(
+            &SETTINGS_NAMESPACE,
+            &address_key,
+            if tag.occupied { tag.address.as_str() } else { "" },
+        );
+        let _ = settings.set(
+            &SETTINGS_NAMESPACE,
+            &rssi_key,
+            if tag.occupied { tag.min_rssi } else { BLE_TAG_DEFAULT_MIN_RSSI },
+        );
+    }
+}
+
+fn default_ble_identity_tags() -> Vec<BleIdentityTagState> {
+    let mut tags = Vec::with_capacity(MAX_BLE_TAGS);
+    for _ in 0..MAX_BLE_TAGS {
+        tags.push(BleIdentityTagState {
+            occupied: false,
+            label: String::new(),
+            address: String::new(),
+            min_rssi: BLE_TAG_DEFAULT_MIN_RSSI,
+            last_rssi: -127,
+            last_seen_ms: 0,
+        });
+    }
+    tags
+}
+
+fn clear_ble_identity_tag(tag: &mut BleIdentityTagState) {
+    tag.occupied = false;
+    tag.label.clear();
+    tag.address.clear();
+    tag.min_rssi = BLE_TAG_DEFAULT_MIN_RSSI;
+    tag.last_rssi = -127;
+    tag.last_seen_ms = 0;
+}
+
+fn ble_identity_tag_present(tag: &BleIdentityTagState, uptime_ms: u32) -> bool {
+    tag.occupied && tag.last_seen_ms > 0 && uptime_ms.saturating_sub(tag.last_seen_ms) <= BLE_TAG_FRESHNESS_MS
+}
+
+fn normalize_ble_identity_value(value: &str) -> String {
+    let mut normalized = String::new();
+    for ch in value.chars() {
+        match ch {
+            'A'..='F' => normalized.push(((ch as u8) - b'A' + b'a') as char),
+            'a'..='f' | '0'..='9' => normalized.push(ch),
+            _ => {}
+        }
+    }
+    normalized
+}
+
+fn ble_tag_key_strings(slot: usize) -> (String, String, String) {
+    let mut label = String::from("btag");
+    append_u32(&mut label, slot.min(u32::MAX as usize) as u32);
+    label.push_str("_lbl");
+
+    let mut address = String::from("btag");
+    append_u32(&mut address, slot.min(u32::MAX as usize) as u32);
+    address.push_str("_mac");
+
+    let mut rssi = String::from("btag");
+    append_u32(&mut rssi, slot.min(u32::MAX as usize) as u32);
+    rssi.push_str("_rssi");
+
+    (label, address, rssi)
 }
 
 fn uptime_ms(boot_started: &Instant) -> u32 {
