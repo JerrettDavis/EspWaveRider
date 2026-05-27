@@ -66,7 +66,7 @@ use espwaverider_core::{
     command::{
         parse_device_command, DeviceCommand, HomeAssistantConfigPayload,
         HomeAssistantMqttEndpointPayload, HomeAssistantWebSocketConfigPayload,
-        RoomConfigPayload, TuningConfigPayload,
+        RoomConfigPayload, RoomPosePublishPayload, TuningConfigPayload,
     },
     metrics::{
         build_radar_derived_metrics, effective_min_activity_score, effective_min_gate_energy,
@@ -254,9 +254,16 @@ struct MqttTaskConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct MqttPublishMessage {
+    topic: heapless::String<128>,
+    payload: heapless::String<384>,
+    retain: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MqttTaskCommand {
     Configure(MqttTaskConfig),
-    PublishRoomSummary(heapless::String<384>),
+    Publish(MqttPublishMessage),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1714,13 +1721,13 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
     let mut read_buffer = [0_u8; 512];
     let mut inbound = heapless::Vec::<u8, 2048>::new();
     let mut config = MqttTaskConfig::default();
-    let mut pending_room_summary: Option<heapless::String<384>> = None;
+    let mut pending_publish: Option<MqttPublishMessage> = None;
 
     loop {
         while let Ok(command) = MQTT_COMMAND_CHANNEL.receiver().try_receive() {
             match command {
                 MqttTaskCommand::Configure(next) => config = next,
-                MqttTaskCommand::PublishRoomSummary(payload) => pending_room_summary = Some(payload),
+                MqttTaskCommand::Publish(message) => pending_publish = Some(message),
             }
         }
 
@@ -1728,7 +1735,7 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
             push_mqtt_status(false, MQTT_STATE_DISCONNECTED, "DISCONNECTED", "");
             match MQTT_COMMAND_CHANNEL.receive().await {
                 MqttTaskCommand::Configure(next) => config = next,
-                MqttTaskCommand::PublishRoomSummary(payload) => pending_room_summary = Some(payload),
+                MqttTaskCommand::Publish(message) => pending_publish = Some(message),
             }
             continue;
         }
@@ -1739,8 +1746,8 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
                 Either::First(()) => {}
                 Either::Second(command) => match command {
                     MqttTaskCommand::Configure(next) => config = next,
-                    MqttTaskCommand::PublishRoomSummary(payload) => {
-                        pending_room_summary = Some(payload)
+                    MqttTaskCommand::Publish(message) => {
+                        pending_publish = Some(message)
                     }
                 },
             }
@@ -1756,7 +1763,7 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
             );
             match MQTT_COMMAND_CHANNEL.receive().await {
                 MqttTaskCommand::Configure(next) => config = next,
-                MqttTaskCommand::PublishRoomSummary(payload) => pending_room_summary = Some(payload),
+                MqttTaskCommand::Publish(message) => pending_publish = Some(message),
             }
             continue;
         }
@@ -1765,7 +1772,7 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
             push_mqtt_status(false, MQTT_STATE_INVALID_HOST, "INVALID_HOST", "");
             match MQTT_COMMAND_CHANNEL.receive().await {
                 MqttTaskCommand::Configure(next) => config = next,
-                MqttTaskCommand::PublishRoomSummary(payload) => pending_room_summary = Some(payload),
+                MqttTaskCommand::Publish(message) => pending_publish = Some(message),
             }
             continue;
         };
@@ -1790,8 +1797,8 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
 
         push_mqtt_status(true, 0, "CONNECTED", config.host.as_str());
 
-        if let Some(payload) = pending_room_summary.take() {
-            let _ = mqtt_send_publish_room_summary(&mut socket, &config, payload.as_str()).await;
+        if let Some(message) = pending_publish.take() {
+            let _ = mqtt_send_publish_message(&mut socket, &message).await;
         }
 
         loop {
@@ -1823,11 +1830,8 @@ async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
                             break;
                         }
                     }
-                    MqttTaskCommand::PublishRoomSummary(payload) => {
-                        if mqtt_send_publish_room_summary(&mut socket, &config, payload.as_str())
-                            .await
-                            .is_err()
-                        {
+                    MqttTaskCommand::Publish(message) => {
+                        if mqtt_send_publish_message(&mut socket, &message).await.is_err() {
                             break;
                         }
                     }
@@ -2423,7 +2427,9 @@ fn process_mqtt_runtime(state: &mut FirmwareState, uptime_ms: u32) {
     {
         if let Some(payload) = build_room_summary_payload(state, uptime_ms) {
             if MQTT_COMMAND_CHANNEL
-                .try_send(MqttTaskCommand::PublishRoomSummary(payload))
+                .try_send(MqttTaskCommand::Publish(build_room_summary_publish_message(
+                    state, payload,
+                )))
                 .is_ok()
             {
                 state.last_mqtt_room_summary_publish_ms = uptime_ms;
@@ -2677,32 +2683,106 @@ fn build_mqtt_subscribe_packet(config: &MqttTaskConfig) -> Option<heapless::Vec<
 }
 
 fn build_mqtt_publish_packet(
-    config: &MqttTaskConfig,
+    topic: &str,
     payload: &str,
+    retain: bool,
 ) -> Option<heapless::Vec<u8, 768>> {
+    let mut variable_and_payload = heapless::Vec::<u8, 768>::new();
+    encode_mqtt_utf8(&mut variable_and_payload, topic)?;
+    variable_and_payload.extend_from_slice(payload.as_bytes()).ok()?;
+
+    let mut packet = heapless::Vec::<u8, 768>::new();
+    packet.push(if retain { 0x31 } else { 0x30 }).ok()?;
+    encode_mqtt_remaining_length(&mut packet, variable_and_payload.len())?;
+    packet.extend_from_slice(variable_and_payload.as_slice()).ok()?;
+    Some(packet)
+}
+
+fn build_room_summary_publish_message(
+    state: &FirmwareState,
+    payload: heapless::String<384>,
+) -> MqttPublishMessage {
+    let mut topic = heapless::String::<128>::new();
+    let _ = topic.push_str(DEFAULT_TOPIC_PREFIX);
+    let _ = topic.push_str("/rooms/");
+    let _ = topic.push_str(&sanitize_hostname(if state.room_id.is_empty() {
+        DEFAULT_ROOM_ID
+    } else {
+        state.room_id.as_str()
+    }));
+    let _ = topic.push_str("/nodes/");
+    let _ = topic.push_str(state.node_id.as_str());
+    let _ = topic.push_str("/summary");
+
+    MqttPublishMessage {
+        topic,
+        payload,
+        retain: true,
+    }
+}
+
+fn build_room_pose_publish_message(
+    state: &FirmwareState,
+    payload: &RoomPosePublishPayload<'_>,
+) -> Option<MqttPublishMessage> {
+    if payload.node_id.is_empty() {
+        return None;
+    }
+
     let mut topic = heapless::String::<128>::new();
     topic.push_str(DEFAULT_TOPIC_PREFIX).ok()?;
     topic.push_str("/rooms/").ok()?;
     topic
-        .push_str(&sanitize_hostname(if config.room_id.is_empty() {
+        .push_str(&sanitize_hostname(if state.room_id.is_empty() {
             DEFAULT_ROOM_ID
         } else {
-            config.room_id.as_str()
+            state.room_id.as_str()
         }))
         .ok()?;
     topic.push_str("/nodes/").ok()?;
-    topic.push_str(config.node_id.as_str()).ok()?;
-    topic.push_str("/summary").ok()?;
+    topic.push_str(payload.node_id).ok()?;
+    topic.push_str("/pose/set").ok()?;
 
-    let mut variable_and_payload = heapless::Vec::<u8, 768>::new();
-    encode_mqtt_utf8(&mut variable_and_payload, topic.as_str())?;
-    variable_and_payload.extend_from_slice(payload.as_bytes()).ok()?;
+    let mut body = heapless::String::<384>::new();
+    body.push_str("{").ok()?;
+    push_json_string_field(&mut body, "node_id", payload.node_id)?;
+    body.push(',').ok()?;
+    push_json_string_field(
+        &mut body,
+        "room_id",
+        if payload.room_id.is_empty() {
+            state.room_id.as_str()
+        } else {
+            payload.room_id
+        },
+    )?;
+    body.push(',').ok()?;
+    push_json_string_field(
+        &mut body,
+        "sensor_role",
+        if payload.sensor_role.is_empty() {
+            state.sensor_role.as_str()
+        } else {
+            payload.sensor_role
+        },
+    )?;
+    body.push_str(",\"pose_x_cm\":").ok()?;
+    append_i32_heapless(&mut body, i32::from(payload.pose_x_cm))?;
+    body.push_str(",\"pose_y_cm\":").ok()?;
+    append_i32_heapless(&mut body, i32::from(payload.pose_y_cm))?;
+    body.push_str(",\"heading_deg\":").ok()?;
+    append_i32_heapless(&mut body, i32::from(payload.heading_deg))?;
+    body.push_str(",\"room_width_cm\":").ok()?;
+    append_u32_heapless(&mut body, u32::from(payload.room_width_cm))?;
+    body.push_str(",\"room_height_cm\":").ok()?;
+    append_u32_heapless(&mut body, u32::from(payload.room_height_cm))?;
+    body.push('}').ok()?;
 
-    let mut packet = heapless::Vec::<u8, 768>::new();
-    packet.push(0x31).ok()?;
-    encode_mqtt_remaining_length(&mut packet, variable_and_payload.len())?;
-    packet.extend_from_slice(variable_and_payload.as_slice()).ok()?;
-    Some(packet)
+    Some(MqttPublishMessage {
+        topic,
+        payload: body,
+        retain: false,
+    })
 }
 
 async fn mqtt_send_connect(socket: &mut TcpSocket<'_>, config: &MqttTaskConfig) -> Result<(), ()> {
@@ -2720,12 +2800,12 @@ async fn mqtt_send_subscribe_room_summary(
     socket.flush().await.map_err(|_| ())
 }
 
-async fn mqtt_send_publish_room_summary(
+async fn mqtt_send_publish_message(
     socket: &mut TcpSocket<'_>,
-    config: &MqttTaskConfig,
-    payload: &str,
+    message: &MqttPublishMessage,
 ) -> Result<(), ()> {
-    let packet = build_mqtt_publish_packet(config, payload).ok_or(())?;
+    let packet = build_mqtt_publish_packet(message.topic.as_str(), message.payload.as_str(), message.retain)
+        .ok_or(())?;
     socket_write_all(socket, packet.as_slice()).await?;
     socket.flush().await.map_err(|_| ())
 }
@@ -3356,7 +3436,6 @@ fn handle_command(
         | Ok(DeviceCommand::Status)
         | Ok(DeviceCommand::HomeAssistantStatus)
         | Ok(DeviceCommand::WifiScan)
-        | Ok(DeviceCommand::HomeAssistantRoomPosePublish(_))
         | Ok(DeviceCommand::BleTagConfig(_))
         | Ok(DeviceCommand::BleTagClear(_)) => state.snapshot_json(uptime_ms(boot_started)),
         Ok(home_assistant_command @ DeviceCommand::HomeAssistantConfig(_)) => {
@@ -3412,6 +3491,19 @@ fn handle_command(
         Ok(DeviceCommand::FirmwareSync) => {
             state.request_firmware_sync(uptime_ms(boot_started));
             state.snapshot_json(uptime_ms(boot_started))
+        }
+        Ok(room_pose_command @ DeviceCommand::HomeAssistantRoomPosePublish(_)) => {
+            match room_pose_command.room_pose_publish_payload() {
+                Ok(payload) => {
+                    if let Some(message) = build_room_pose_publish_message(state, &payload) {
+                        let _ = MQTT_COMMAND_CHANNEL.try_send(MqttTaskCommand::Publish(message));
+                        state.snapshot_json(uptime_ms(boot_started))
+                    } else {
+                        String::from(r#"{"error":"invalid_room_pose_publish"}"#)
+                    }
+                }
+                Err(_) => String::from(r#"{"error":"invalid_room_pose_publish"}"#),
+            }
         }
         Ok(DeviceCommand::FirmwareUpdate(target_version)) => {
             state.request_firmware_update(target_version, "manual", "manual");

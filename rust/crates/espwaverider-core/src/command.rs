@@ -33,6 +33,18 @@ pub struct RoomConfigPayload<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomPosePublishPayload<'a> {
+    pub node_id: &'a str,
+    pub room_id: &'a str,
+    pub sensor_role: &'a str,
+    pub pose_x_cm: i16,
+    pub pose_y_cm: i16,
+    pub heading_deg: i16,
+    pub room_width_cm: u16,
+    pub room_height_cm: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuningConfigPayload {
     pub max_detection_range_cm: u16,
     pub min_gate_energy: u16,
@@ -167,6 +179,17 @@ impl<'a> DeviceCommand<'a> {
         }
     }
 
+    pub fn room_pose_publish_payload(
+        &self,
+    ) -> Result<RoomPosePublishPayload<'a>, CommandPayloadParseError> {
+        match self {
+            DeviceCommand::HomeAssistantRoomPosePublish(payload) => {
+                parse_room_pose_publish_payload(payload)
+            }
+            _ => Err(CommandPayloadParseError::new("command is not ha_room_pose_publish")),
+        }
+    }
+
     pub fn home_assistant_websocket_config_payload(
         &self,
     ) -> Result<HomeAssistantWebSocketConfigPayload<'a>, CommandPayloadParseError> {
@@ -227,6 +250,23 @@ pub fn parse_room_config_payload(
         heading_deg: parse_i16(fields[4], "invalid room heading")?,
         room_width_cm: parse_u16(fields[5], "invalid room width")?,
         room_height_cm: parse_u16(fields[6], "invalid room height")?,
+    })
+}
+
+pub fn parse_room_pose_publish_payload(
+    payload: &str,
+) -> Result<RoomPosePublishPayload<'_>, CommandPayloadParseError> {
+    let fields = split_fields::<8>(payload)?;
+
+    Ok(RoomPosePublishPayload {
+        node_id: fields[0],
+        room_id: fields[1],
+        sensor_role: fields[2],
+        pose_x_cm: parse_i16(fields[3], "invalid room pose x")?,
+        pose_y_cm: parse_i16(fields[4], "invalid room pose y")?,
+        heading_deg: parse_i16(fields[5], "invalid room heading")?,
+        room_width_cm: parse_u16(fields[6], "invalid room width")?,
+        room_height_cm: parse_u16(fields[7], "invalid room height")?,
     })
 }
 
@@ -392,6 +432,14 @@ mod tests {
                 "room-default|auto|50|25|-90|800|400"
             ))
         );
+        assert_eq!(
+            parse_device_command(
+                "ha_room_pose_publish:node-2|room-default|auto|50|25|-90|800|400"
+            ),
+            Ok(DeviceCommand::HomeAssistantRoomPosePublish(
+                "node-2|room-default|auto|50|25|-90|800|400"
+            ))
+        );
     }
 
     #[test]
@@ -452,6 +500,28 @@ mod tests {
         assert_eq!(
             command.room_config_payload().unwrap(),
             RoomConfigPayload {
+                room_id: "room-default",
+                sensor_role: "auto",
+                pose_x_cm: 50,
+                pose_y_cm: 25,
+                heading_deg: -90,
+                room_width_cm: 800,
+                room_height_cm: 400,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_typed_room_pose_publish_payload() {
+        let command = parse_device_command(
+            "ha_room_pose_publish:node-2|room-default|auto|50|25|-90|800|400",
+        )
+        .unwrap();
+
+        assert_eq!(
+            command.room_pose_publish_payload().unwrap(),
+            RoomPosePublishPayload {
+                node_id: "node-2",
                 room_id: "room-default",
                 sensor_role: "auto",
                 pose_x_cm: 50,
