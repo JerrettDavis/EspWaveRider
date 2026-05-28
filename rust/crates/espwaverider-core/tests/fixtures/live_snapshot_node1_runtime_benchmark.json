@@ -140,6 +140,7 @@
         "room_id": "room-default",
         "sensor_role": "auto",
         "firmware_version": "v1.0.1",
+        "build_target": "lonely-esp32-s3-devkitm-1",
         "hostname": "lb-mmwave-presence-test2",
         "ip_address": "10.0.107.149",
         "wifi_rssi_dbm": -50,
@@ -153,6 +154,7 @@
   "room_peers": [
     {
       "node_id": "lb_mmwave_presence_test2",
+      "build_target": "lonely-esp32-s3-devkitm-1",
       "sensor_role": "auto",
       "firmware_version": "v1.0.1",
       "presence": true,

@@ -655,6 +655,7 @@ struct UdpDiscoveryPeerState {
     room_id: String,
     sensor_role: String,
     firmware_version: String,
+    build_target: String,
     hostname: String,
     ip_address: String,
     wifi_rssi_dbm: i32,
@@ -882,6 +883,7 @@ impl FirmwareState {
                 room_id: peer.room_id.clone(),
                 sensor_role: peer.sensor_role.clone(),
                 firmware_version: peer.firmware_version.clone(),
+                build_target: peer.build_target.clone(),
                 hostname: peer.hostname.clone(),
                 ip_address: peer.ip_address.clone(),
                 wifi_rssi_dbm: peer.wifi_rssi_dbm,
@@ -904,6 +906,7 @@ impl FirmwareState {
             })
             .map(|peer| RoomPeerSnapshot {
                 node_id: peer.node_id.clone(),
+                build_target: peer.build_target.clone(),
                 pose_x_cm: peer.pose_x_cm,
                 pose_y_cm: peer.pose_y_cm,
                 heading_deg: peer.heading_deg,
@@ -924,6 +927,10 @@ impl FirmwareState {
             .iter()
             .filter(|peer| uptime_ms.saturating_sub(peer.last_seen_ms) <= UDP_DISCOVERY_PEER_FRESHNESS_MS)
         {
+            if peer.build_target != RUST_BUILD_TARGET {
+                continue;
+            }
+
             let candidate_version = semantic_version_core(&peer.firmware_version);
             if candidate_version.is_empty() {
                 continue;
@@ -1085,6 +1092,7 @@ impl FirmwareState {
             room_id: json_field_string(payload, "room_id").unwrap_or_default(),
             sensor_role: json_field_string(payload, "sensor_role").unwrap_or_default(),
             firmware_version: json_field_string(payload, "firmware_version").unwrap_or_default(),
+            build_target: json_field_string(payload, "build_target").unwrap_or_default(),
             hostname: json_field_string(payload, "hostname").unwrap_or_default(),
             ip_address: json_field_string(payload, "ip_address").unwrap_or_default(),
             wifi_rssi_dbm: json_field_i32(payload, "wifi_rssi_dbm").unwrap_or_default(),
@@ -1109,6 +1117,7 @@ impl FirmwareState {
             existing.room_id = peer.room_id;
             existing.sensor_role = peer.sensor_role;
             existing.firmware_version = peer.firmware_version;
+            existing.build_target = peer.build_target;
             existing.hostname = peer.hostname;
             existing.ip_address = peer.ip_address;
             existing.wifi_rssi_dbm = peer.wifi_rssi_dbm;
@@ -1171,6 +1180,7 @@ impl FirmwareState {
                 room_id: String::new(),
                 sensor_role: String::new(),
                 firmware_version: String::new(),
+                build_target: String::new(),
                 hostname: String::new(),
                 ip_address: String::new(),
                 wifi_rssi_dbm: 0,
@@ -1192,6 +1202,7 @@ impl FirmwareState {
         peer.room_id = json_field_string(payload, "room_id").unwrap_or_default();
         peer.sensor_role = json_field_string(payload, "sensor_role").unwrap_or_default();
         peer.firmware_version = json_field_string(payload, "firmware_version").unwrap_or_default();
+        peer.build_target = json_field_string(payload, "build_target").unwrap_or_default();
         peer.pose_x_cm = json_field_i32(payload, "pose_x_cm").unwrap_or_default();
         peer.pose_y_cm = json_field_i32(payload, "pose_y_cm").unwrap_or_default();
         peer.heading_deg = json_field_i32(payload, "heading_deg").unwrap_or(-90);
@@ -2810,6 +2821,8 @@ fn build_udp_discovery_payload(
     payload.push(',').ok()?;
     push_json_string_field(&mut payload, "firmware_version", RUST_FIRMWARE_VERSION)?;
     payload.push(',').ok()?;
+    push_json_string_field(&mut payload, "build_target", RUST_BUILD_TARGET)?;
+    payload.push(',').ok()?;
     push_json_string_field(&mut payload, "hostname", &state.device_hostname())?;
     payload.push(',').ok()?;
     push_json_string_field(&mut payload, "ip_address", &state.ip_address)?;
@@ -2845,6 +2858,8 @@ fn build_room_summary_payload(
     push_json_string_field(&mut payload, "sensor_role", &state.sensor_role)?;
     payload.push(',').ok()?;
     push_json_string_field(&mut payload, "firmware_version", RUST_FIRMWARE_VERSION)?;
+    payload.push(',').ok()?;
+    push_json_string_field(&mut payload, "build_target", RUST_BUILD_TARGET)?;
     payload.push_str(",\"pose_x_cm\":").ok()?;
     append_i32_heapless(&mut payload, state.pose_x_cm)?;
     payload.push_str(",\"pose_y_cm\":").ok()?;

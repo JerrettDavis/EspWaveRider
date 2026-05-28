@@ -248,6 +248,7 @@ struct UdpDiscoveryPeer {
   String roomId;
   String sensorRole;
   String firmwareVersion;
+  String buildTarget;
   String hostname;
   String ipAddress;
   int32_t wifiRssi = 0;
@@ -369,6 +370,7 @@ struct RoomPeerSummary {
   String nodeId;
   String sensorRole;
   String firmwareVersion;
+  String buildTarget;
   bool presence = false;
   bool detectionCandidate = false;
   uint8_t peopleEstimate = 0;
@@ -1495,6 +1497,7 @@ void appendUdpDiscoveryPeersJson(String& json) {
     json += ",\"room_id\":\"" + jsonEscape(peer.roomId) + "\"";
     json += ",\"sensor_role\":\"" + jsonEscape(peer.sensorRole) + "\"";
     json += ",\"firmware_version\":\"" + jsonEscape(peer.firmwareVersion) + "\"";
+    json += ",\"build_target\":\"" + jsonEscape(peer.buildTarget) + "\"";
     json += ",\"hostname\":\"" + jsonEscape(peer.hostname) + "\"";
     json += ",\"ip_address\":\"" + jsonEscape(peer.ipAddress) + "\"";
     json += ",\"wifi_rssi_dbm\":" + String(peer.wifiRssi);
@@ -1591,6 +1594,7 @@ void appendRoomPeersJson(String& json, int localDominantGateDistanceCm) {
     json += "{\"node_id\":\"" + jsonEscape(peer.nodeId) + "\"";
     json += ",\"sensor_role\":\"" + jsonEscape(peer.sensorRole) + "\"";
     json += ",\"firmware_version\":\"" + jsonEscape(peer.firmwareVersion) + "\"";
+    json += ",\"build_target\":\"" + jsonEscape(peer.buildTarget) + "\"";
     json += ",\"presence\":" + String(peer.presence ? "true" : "false");
     json += ",\"detection_candidate\":" + String(peer.detectionCandidate ? "true" : "false");
     json += ",\"people_estimate\":" + String(peer.peopleEstimate);
@@ -1634,6 +1638,7 @@ void announceUdpDiscovery(bool emitEvent) {
                    "\"room_id\":\"" + jsonEscape(runtimeConfig.roomId) + "\"," +
                    "\"sensor_role\":\"" + jsonEscape(runtimeConfig.sensorRole) + "\"," +
                    "\"firmware_version\":\"" + jsonEscape(firmwareVersion()) + "\"," +
+                   "\"build_target\":\"" + jsonEscape(firmwareBuildTarget()) + "\"," +
                    "\"hostname\":\"" + jsonEscape(deviceHostname()) + "\"," +
                    "\"ip_address\":\"" + jsonEscape(WiFi.localIP().toString()) + "\"," +
                    "\"wifi_rssi_dbm\":" + String(WiFi.RSSI()) + "," +
@@ -1721,6 +1726,7 @@ void serviceUdpDiscovery() {
         peer.roomId = jsonFieldString(payload, "room_id");
         peer.sensorRole = jsonFieldString(payload, "sensor_role");
         peer.firmwareVersion = jsonFieldString(payload, "firmware_version");
+        peer.buildTarget = jsonFieldString(payload, "build_target");
         peer.hostname = jsonFieldString(payload, "hostname");
         peer.ipAddress = jsonFieldString(payload, "ip_address");
         if (peer.ipAddress.length() == 0) {
@@ -1789,6 +1795,7 @@ void handleRoomSummaryMessage(const String& topic, const String& payload) {
   peer.nodeId = peerNodeId;
   peer.sensorRole = jsonFieldString(payload, "sensor_role");
   peer.firmwareVersion = jsonFieldString(payload, "firmware_version");
+  peer.buildTarget = jsonFieldString(payload, "build_target");
   peer.presence = jsonFieldBool(payload, "presence", false);
   peer.detectionCandidate = jsonFieldBool(payload, "detection_candidate", false);
   peer.peopleEstimate = static_cast<uint8_t>(max(0, jsonFieldInt(payload, "people_estimate", 0)));
@@ -2514,6 +2521,7 @@ void publishObservationFeed() {
   payload += "\"node_id\":\"" + jsonEscape(runtimeConfig.nodeId) + "\"";
   payload += ",\"friendly_name\":\"" + jsonEscape(runtimeConfig.friendlyName) + "\"";
   payload += ",\"firmware_version\":\"" + jsonEscape(firmwareVersion()) + "\"";
+  payload += ",\"build_target\":\"" + jsonEscape(firmwareBuildTarget()) + "\"";
   payload += ",\"room_id\":\"" + jsonEscape(runtimeConfig.roomId) + "\"";
   payload += ",\"sensor_role\":\"" + jsonEscape(runtimeConfig.sensorRole) + "\"";
   payload += ",\"device_hostname\":\"" + jsonEscape(deviceHostname()) + "\"";
@@ -3171,11 +3179,12 @@ bool findHighestPeerReleaseVersion(String& nodeId, String& version, String& sour
   String bestNodeId;
   String bestVersion;
   String bestSource;
+  const String localBuildTarget = firmwareBuildTarget();
 
   const uint32_t now = millis();
-  auto considerPeer = [&](const String& candidateNodeId, const String& candidateVersion, const String& candidateSource) {
+  auto considerPeer = [&](const String& candidateNodeId, const String& candidateVersion, const String& candidateBuildTarget, const String& candidateSource) {
     const String candidateCore = semanticVersionCore(candidateVersion);
-    if (candidateNodeId.length() == 0 || candidateCore.length() == 0) {
+    if (candidateNodeId.length() == 0 || candidateCore.length() == 0 || candidateBuildTarget != localBuildTarget) {
       return;
     }
 
@@ -3191,7 +3200,7 @@ bool findHighestPeerReleaseVersion(String& nodeId, String& version, String& sour
     if (!peer.occupied || (now - peer.lastUpdatedMs) > ROOM_PEER_FRESHNESS_MS) {
       continue;
     }
-    considerPeer(peer.nodeId, peer.firmwareVersion, "room_summary");
+    considerPeer(peer.nodeId, peer.firmwareVersion, peer.buildTarget, "room_summary");
   }
 
   for (uint8_t index = 0; index < MAX_UDP_DISCOVERY_PEERS; index++) {
@@ -3199,7 +3208,7 @@ bool findHighestPeerReleaseVersion(String& nodeId, String& version, String& sour
     if (!peer.occupied || (now - peer.lastSeenMs) > UDP_DISCOVERY_PEER_FRESHNESS_MS) {
       continue;
     }
-    considerPeer(peer.nodeId, peer.firmwareVersion, "udp_discovery");
+    considerPeer(peer.nodeId, peer.firmwareVersion, peer.buildTarget, "udp_discovery");
   }
 
   nodeId = bestNodeId;

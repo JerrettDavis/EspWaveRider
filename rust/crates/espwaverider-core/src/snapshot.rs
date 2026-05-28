@@ -52,6 +52,8 @@ pub struct UdpDiscoveryPeerSnapshot {
     pub room_id: String,
     pub sensor_role: String,
     pub firmware_version: String,
+    #[serde(default)]
+    pub build_target: String,
     pub hostname: String,
     pub ip_address: String,
     pub wifi_rssi_dbm: i32,
@@ -73,6 +75,8 @@ pub struct UdpDiscoverySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomPeerSnapshot {
     pub node_id: String,
+    #[serde(default)]
+    pub build_target: String,
     pub pose_x_cm: i32,
     pub pose_y_cm: i32,
     pub heading_deg: i32,
@@ -376,6 +380,7 @@ mod tests {
                     room_id: "room-default".into(),
                     sensor_role: "auto".into(),
                     firmware_version: "v1.0.1".into(),
+                    build_target: "lonely-esp32-s3-devkitm-1".into(),
                     hostname: "lb-mmwave-presence-test1".into(),
                     ip_address: "10.0.107.148".into(),
                     wifi_rssi_dbm: -55,

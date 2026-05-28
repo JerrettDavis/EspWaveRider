@@ -107,6 +107,7 @@
         "room_id": "room-default",
         "sensor_role": "auto",
         "firmware_version": "v1.0.1",
+        "build_target": "lonely-esp32-s3-devkitm-1",
         "hostname": "lb-mmwave-presence-test1",
         "ip_address": "10.0.107.148",
         "wifi_rssi_dbm": -55,
