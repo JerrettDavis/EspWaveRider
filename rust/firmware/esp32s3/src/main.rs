@@ -86,7 +86,7 @@ use espwaverider_core::{
     },
     mqtt::{looks_like_room_summary_payload, mqtt_room_summary_payload_from_publish},
     radar::{parse_radar_frame, EnergyFrame, GenericFrame, RadarFrame, TextFrame},
-    release::firmware_release_asset_url,
+    release::{parse_download_url, firmware_release_asset_url, DownloadUrlScheme},
     snapshot::{
         BleBeaconSnapshot, BleTagSnapshot, DeviceSnapshot, FirmwareSyncSnapshot,
         LatestEnergyFrameSnapshot, LatestGenericFrameSnapshot, LatestTextFrameSnapshot,
@@ -1064,10 +1064,25 @@ impl FirmwareState {
             self.firmware_sync_state.status = String::from(
                 "Rust firmware sync could not resolve a GitHub release asset URL for this board target.",
             );
+        } else if let Some(download_url) = parse_download_url(&self.firmware_sync_state.download_url) {
+            match download_url.scheme {
+                DownloadUrlScheme::Https => {
+                    self.firmware_sync_state.last_error = String::from("release_download_tls_unsupported");
+                    self.firmware_sync_state.status = String::from(
+                        "Rust firmware sync resolved an HTTPS release asset URL, but Rust OTA does not have TLS transport support yet.",
+                    );
+                }
+                DownloadUrlScheme::Http => {
+                    self.firmware_sync_state.last_error = String::from("download_flash_write_not_implemented");
+                    self.firmware_sync_state.status = String::from(
+                        "Rust firmware sync parsed the release asset download URL, but streaming firmware into flash is not implemented yet.",
+                    );
+                }
+            }
         } else {
-            self.firmware_sync_state.last_error = String::from("download_and_apply_not_implemented");
+            self.firmware_sync_state.last_error = String::from("release_download_url_invalid");
             self.firmware_sync_state.status = String::from(
-                "Rust firmware sync resolved the GitHub release asset URL but does not download and apply firmware yet.",
+                "Rust firmware sync resolved a release asset URL, but it is not a valid HTTP or HTTPS download target.",
             );
         }
         self.firmware_sync_state.last_completed_ms = uptime_ms;

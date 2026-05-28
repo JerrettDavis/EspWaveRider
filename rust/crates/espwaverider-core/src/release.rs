@@ -1,5 +1,19 @@
 use alloc::string::String;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadUrlScheme {
+    Http,
+    Https,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDownloadUrl {
+    pub scheme: DownloadUrlScheme,
+    pub host: String,
+    pub port: u16,
+    pub path: String,
+}
+
 pub fn semantic_version_core(version: &str) -> String {
     let trimmed = version.trim();
     if trimmed.is_empty() {
@@ -78,6 +92,48 @@ pub fn firmware_release_asset_url(
     url
 }
 
+pub fn parse_download_url(url: &str) -> Option<ParsedDownloadUrl> {
+    let trimmed = url.trim();
+    let (scheme_text, remainder) = trimmed.split_once("://")?;
+    let scheme = if scheme_text.eq_ignore_ascii_case("http") {
+        DownloadUrlScheme::Http
+    } else if scheme_text.eq_ignore_ascii_case("https") {
+        DownloadUrlScheme::Https
+    } else {
+        return None;
+    };
+
+    let slash_index = remainder.find('/')?;
+    let authority = &remainder[..slash_index];
+    let path = &remainder[slash_index..];
+    if authority.is_empty() || path.is_empty() {
+        return None;
+    }
+
+    let default_port = match scheme {
+        DownloadUrlScheme::Http => 80,
+        DownloadUrlScheme::Https => 443,
+    };
+
+    let (host, port) = if let Some((host, port_text)) = authority.rsplit_once(':') {
+        if host.is_empty() || port_text.is_empty() || !port_text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+
+        let port = port_text.parse::<u16>().ok()?;
+        (host, port)
+    } else {
+        (authority, default_port)
+    };
+
+    Some(ParsedDownloadUrl {
+        scheme,
+        host: String::from(host),
+        port,
+        path: String::from(path),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +164,42 @@ mod tests {
             ),
             "https://github.com/JerrettDavis/EspWaveRider/releases/download/v1.2.3/EspWaveRider-1.2.3-lonely-esp32-s3-devkitm-1.bin"
         );
+    }
+
+    #[test]
+    fn parses_https_download_url() {
+        assert_eq!(
+            parse_download_url(
+                "https://github.com/JerrettDavis/EspWaveRider/releases/download/v1.2.3/EspWaveRider-1.2.3-lonely-esp32-s3-devkitm-1.bin"
+            ),
+            Some(ParsedDownloadUrl {
+                scheme: DownloadUrlScheme::Https,
+                host: String::from("github.com"),
+                port: 443,
+                path: String::from(
+                    "/JerrettDavis/EspWaveRider/releases/download/v1.2.3/EspWaveRider-1.2.3-lonely-esp32-s3-devkitm-1.bin"
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_http_download_url_with_explicit_port() {
+        assert_eq!(
+            parse_download_url("http://example.local:8080/fw.bin"),
+            Some(ParsedDownloadUrl {
+                scheme: DownloadUrlScheme::Http,
+                host: String::from("example.local"),
+                port: 8080,
+                path: String::from("/fw.bin"),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_download_url() {
+        assert!(parse_download_url("github.com/releases/download/fw.bin").is_none());
+        assert!(parse_download_url("ftp://github.com/fw.bin").is_none());
+        assert!(parse_download_url("https://github.com").is_none());
     }
 }
