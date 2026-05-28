@@ -9,6 +9,10 @@ fn parses_live_snapshot_fixture() {
     assert_eq!(snapshot.build_target, "lonely-esp32-s3-devkitm-1");
     assert_eq!(snapshot.udp_discovery.peer_count, 1);
     assert_eq!(snapshot.udp_discovery.peers[0].ip_address, "10.0.107.148");
+    assert_eq!(
+        snapshot.udp_discovery.peers[0].build_target,
+        "lonely-esp32-s3-devkitm-1"
+    );
     assert_eq!(snapshot.ble_beacon_count, 16);
     assert_eq!(snapshot.latest_energy_frame.as_ref().unwrap().gates.len(), 16);
     assert!(snapshot.latest_text_frame.is_none());
@@ -34,6 +38,10 @@ fn parses_runtime_benchmark_snapshot_fixture() {
     assert_eq!(snapshot.node_id, "lb_mmwave_presence_test1");
     assert_eq!(snapshot.dominant_gate_index, -1);
     assert_eq!(snapshot.dominant_gate_distance_cm, -1);
+    assert_eq!(
+        snapshot.room_peers[0].build_target,
+        "lonely-esp32-s3-devkitm-1"
+    );
     assert_eq!(runtime_benchmark.iterations, 1000);
     assert_eq!(runtime_benchmark.parse_command_fixture.per_iter_ns, 4200);
     assert_eq!(runtime_benchmark.parse_room_config_fixture.per_iter_ns, 22100);
