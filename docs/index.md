@@ -5,9 +5,10 @@ EspWaveRider is ESP32 firmware for mmWave presence sensing, diagnostics, Home As
 The documentation site is organized around the normal device lifecycle:
 
 - Install the firmware and toolchain.
+- Get a node online and validate the first snapshot.
 - Configure board-specific wiring and runtime settings.
 - Operate the hosted dashboard, room editor, and firmware sync flow.
-- Validate changes locally and understand the release pipeline.
+- Validate changes locally, compare C++ vs Rust behavior, and understand the release pipeline.
 
 ## Core capabilities
 
@@ -20,10 +21,25 @@ The documentation site is organized around the normal device lifecycle:
 ## Quick links
 
 - [Install the firmware](install.md)
+- [Getting started](getting-started.md)
 - [Configure wiring and runtime settings](configuration.md)
 - [Operate the dashboard and OTA workflow](operations.md)
 - [Inspect the HTTP and command surface](api.md)
+- [Review the current C++ vs Rust benchmark and size comparison](benchmarks-and-comparison.md)
+- [Check the validated feature parity matrix](parity-matrix.md)
 - [Run tests and understand releases](testing-and-release.md)
+- [Review the release process and release quality bar](release-guide.md)
+
+## Recommended reading order
+
+1. [Install](install.md)
+2. [Getting started](getting-started.md)
+3. [Configuration](configuration.md)
+4. [Operations](operations.md)
+5. [Benchmarks and comparison](benchmarks-and-comparison.md)
+6. [Parity matrix](parity-matrix.md)
+7. [Testing and releases](testing-and-release.md)
+8. [Release guide](release-guide.md)
 
 ## Repository structure
 
@@ -33,3 +49,14 @@ The documentation site is organized around the normal device lifecycle:
 - `include/board_profile.h`: board defaults.
 - `include/board_user_config.example.h`: local override template.
 - `scripts/embed_visualizer.py`: embeds the dashboard into firmware at build time.
+
+## Production-readiness snapshot
+
+| Area | Current position |
+| --- | --- |
+| Shipping firmware baseline | C++ |
+| Board-specific GitHub release assets | Implemented |
+| Hosted dashboard, snapshot API, room collaboration | Production-oriented and documented |
+| Rust parity work | Strong on core runtime and contracts, not fully production-equivalent yet |
+
+The Rust port is close enough to compare seriously, but not yet something this repo should market as a production-equivalent replacement for the C++ firmware. The current blockers are OTA apply and stable BLE scanning.

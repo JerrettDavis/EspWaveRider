@@ -23,6 +23,17 @@ def cpp_string(value):
     return f'\\"{escaped}\\"'
 
 
+def resolve_release_target(pio_env):
+    explicit_targets = {
+        "esp32-s3-devkitm-1": "lonely-esp32-s3-devkitm-1",
+        "esp32dev-uart1": "esp32-generic-uart1",
+        "heltec-wifi-lora-32-v3": "heltec-wifi-lora-32-v3",
+        "heltec-wifi-lora-32-v4": "heltec-wifi-lora-32-v4-compatible",
+    }
+
+    return explicit_targets.get(pio_env, pio_env)
+
+
 def resolve_firmware_version(project_dir, env_vars=None, git_runner=None):
     env_vars = env_vars or os.environ
     git_runner = git_runner or (lambda *args: run_git(project_dir, *args))
@@ -50,7 +61,7 @@ def resolve_git_sha(project_dir, git_runner=None):
 def build_cpp_defines(project_dir, pio_env, env_vars=None, git_runner=None):
     return [
         ("ESPWAVERIDER_FIRMWARE_VERSION", cpp_string(resolve_firmware_version(project_dir, env_vars, git_runner))),
-        ("ESPWAVERIDER_BUILD_TARGET", cpp_string(pio_env)),
+        ("ESPWAVERIDER_BUILD_TARGET", cpp_string(resolve_release_target(pio_env))),
         ("ESPWAVERIDER_GIT_SHA", cpp_string(resolve_git_sha(project_dir, git_runner))),
     ]
 

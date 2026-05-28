@@ -9,6 +9,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 #[cfg(not(feature = "usb-console"))]
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata as UdpPacketMetadata, UdpSocket};
 use embassy_executor::Spawner;
 use embassy_futures::{
+    join::join,
     select::{select, select3, Either, Either3},
     yield_now,
 };
@@ -42,7 +44,9 @@ use esp_hal::{
     efuse,
     gpio::{Input, InputConfig, Level, Pull},
     interrupt::software::SoftwareInterruptControl,
+    rtc_cntl::{SocResetReason, reset_reason},
     rmt::{Channel, PulseCode, Rmt, Tx, TxChannelConfig, TxChannelCreator},
+    system::Cpu,
     time::{Instant, Rate},
     timer::timg::TimerGroup,
     uart::{Config as UartConfig, Uart},
@@ -59,10 +63,17 @@ use esp_radio::wifi::{
     Config as RadioWifiConfig,
     ControllerConfig as RadioWifiControllerConfig,
     Interface as WifiInterface,
+    PowerSaveMode,
     WifiController,
 };
 use esp_storage::FlashStorage;
 use espwaverider_core::{
+    ble::{
+        BLE_TAG_DEFAULT_MIN_RSSI, BLE_TAG_FRESHNESS_MS,
+        BleBeaconSightingState, BleIdentityTagState, ble_beacon_sighting_active,
+        ble_identity_tag_present, clear_ble_identity_tag, extract_ble_local_name,
+        extract_ble_service_uuid, normalize_ble_identity_value, record_ble_advertisement,
+    },
     board::{PresencePinMode, ESP32_S3_DEVKITM_1},
     command::{
         parse_device_command, BleTagClearPayload, BleTagConfigPayload, DeviceCommand, HomeAssistantConfigPayload,
@@ -75,6 +86,7 @@ use espwaverider_core::{
     },
     mqtt::{looks_like_room_summary_payload, mqtt_room_summary_payload_from_publish},
     radar::{parse_radar_frame, EnergyFrame, GenericFrame, RadarFrame, TextFrame},
+    release::firmware_release_asset_url,
     snapshot::{
         BleBeaconSnapshot, BleTagSnapshot, DeviceSnapshot, FirmwareSyncSnapshot,
         LatestEnergyFrameSnapshot, LatestGenericFrameSnapshot, LatestTextFrameSnapshot,
@@ -84,6 +96,10 @@ use espwaverider_core::{
 };
 use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr};
 use static_cell::StaticCell;
+use trouble_host::prelude::{
+    Address as TroubleAddress, DefaultPacketPool, EventHandler as TroubleEventHandler,
+    ExternalController, HostResources, PhySet, ScanConfig as BleScanConfig, Scanner,
+};
 
 #[cfg(not(feature = "usb-console"))]
 struct UsbSerialJtag<'a, M> {
@@ -112,8 +128,10 @@ impl<'a, M> UsbSerialJtag<'a, M> {
 }
 
 const RUST_FIRMWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RUST_BUILD_TARGET: &str = "esp32s3-rust-bare-metal";
+const RUST_BUILD_TARGET: &str = "lonely-esp32-s3-devkitm-1";
 const RUST_GIT_SHA: &str = "rust-port";
+const FIRMWARE_RELEASE_REPO_OWNER: &str = "JerrettDavis";
+const FIRMWARE_RELEASE_REPO_NAME: &str = "EspWaveRider";
 const DEFAULT_NODE_ID_PREFIX: &str = "lb_mmwave_presence";
 const DEFAULT_FRIENDLY_NAME_PREFIX: &str = "LB mmWave Presence";
 const DEFAULT_ROOM_ID: &str = "room-default";
@@ -154,9 +172,13 @@ const SETTINGS_KEY_MIN_GATES: Key = Key::from_str("min_gates");
 const SETTINGS_KEY_MIN_ACT: Key = Key::from_str("min_act");
 const SETTINGS_KEY_LED_ON: Key = Key::from_str("led_on");
 const SETTINGS_KEY_LED_BRI: Key = Key::from_str("led_bri");
+const SETTINGS_KEY_BOOT_COUNT: Key = Key::from_str("boot_cnt");
+const MAX_BLE_SIGHTINGS: usize = 16;
 const MAX_BLE_TAGS: usize = 8;
-const BLE_TAG_FRESHNESS_MS: u32 = 45_000;
-const BLE_TAG_DEFAULT_MIN_RSSI: i32 = -88;
+const MAX_BLE_ADV_DATA_LEN: usize = 31;
+const BLE_SCAN_INTERVAL_MS: u64 = 2000;
+const BLE_SCAN_WINDOW_MS: u64 = 100;
+const ENABLE_BLE_SCANNER_TASK: bool = false;
 const DEFAULT_AP_NETMASK: Ipv4Address = Ipv4Address::new(255, 255, 255, 0);
 const DEFAULT_AP_GATEWAY: Ipv4Address = Ipv4Address::new(192, 168, 4, 1);
 const DEFAULT_DHCP_LEASE_SECS: u32 = 86_400;
@@ -165,6 +187,7 @@ const DEFAULT_DHCP_REBIND_SECS: u32 = 75_600;
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
 const HTTP_SERVER_PORT: u16 = 80;
+const HTTP_SOCKET_BUFFER_SIZE: usize = 2048;
 const AP_NET_STACK_SOCKETS: usize = 4;
 const STATION_NET_STACK_SOCKETS: usize = 6;
 const MAX_UDP_DISCOVERY_PEERS: usize = 12;
@@ -179,6 +202,7 @@ const MQTT_STATE_INVALID_HOST: i32 = -3;
 const MQTT_STATE_CONNECT_ERROR: i32 = -4;
 const MQTT_STATE_PROTOCOL_ERROR: i32 = -5;
 const MQTT_KEEPALIVE_SECS: u16 = 30;
+const MQTT_SOCKET_BUFFER_SIZE: usize = 1024;
 const MQTT_PACKET_ID_SUBSCRIBE: u16 = 1;
 const MQTT_SUMMARY_PUBLISH_MS: u32 = 5_000;
 const WIFI_CONNECT_TIMEOUT_MS: u64 = 5_000;
@@ -214,16 +238,16 @@ static DHCP_RX_META: StaticCell<[UdpPacketMetadata; 4]> = StaticCell::new();
 static DHCP_TX_META: StaticCell<[UdpPacketMetadata; 4]> = StaticCell::new();
 static DHCP_RX_BUFFER: StaticCell<[u8; 1536]> = StaticCell::new();
 static DHCP_TX_BUFFER: StaticCell<[u8; 1536]> = StaticCell::new();
-static AP_HTTP_RX_BUFFER: StaticCell<[u8; 4096]> = StaticCell::new();
-static AP_HTTP_TX_BUFFER: StaticCell<[u8; 4096]> = StaticCell::new();
-static STATION_HTTP_RX_BUFFER: StaticCell<[u8; 4096]> = StaticCell::new();
-static STATION_HTTP_TX_BUFFER: StaticCell<[u8; 4096]> = StaticCell::new();
+static AP_HTTP_RX_BUFFER: StaticCell<[u8; HTTP_SOCKET_BUFFER_SIZE]> = StaticCell::new();
+static AP_HTTP_TX_BUFFER: StaticCell<[u8; HTTP_SOCKET_BUFFER_SIZE]> = StaticCell::new();
+static STATION_HTTP_RX_BUFFER: StaticCell<[u8; HTTP_SOCKET_BUFFER_SIZE]> = StaticCell::new();
+static STATION_HTTP_TX_BUFFER: StaticCell<[u8; HTTP_SOCKET_BUFFER_SIZE]> = StaticCell::new();
 static STATION_DISCOVERY_RX_META: StaticCell<[UdpPacketMetadata; 8]> = StaticCell::new();
 static STATION_DISCOVERY_TX_META: StaticCell<[UdpPacketMetadata; 8]> = StaticCell::new();
 static STATION_DISCOVERY_RX_BUFFER: StaticCell<[u8; 2048]> = StaticCell::new();
 static STATION_DISCOVERY_TX_BUFFER: StaticCell<[u8; 2048]> = StaticCell::new();
-static STATION_MQTT_RX_BUFFER: StaticCell<[u8; 2048]> = StaticCell::new();
-static STATION_MQTT_TX_BUFFER: StaticCell<[u8; 2048]> = StaticCell::new();
+static STATION_MQTT_RX_BUFFER: StaticCell<[u8; MQTT_SOCKET_BUFFER_SIZE]> = StaticCell::new();
+static STATION_MQTT_TX_BUFFER: StaticCell<[u8; MQTT_SOCKET_BUFFER_SIZE]> = StaticCell::new();
 static HTTP_REQUEST_CHANNEL: SyncChannel<CriticalSectionRawMutex, HttpRequestMessage, 1> =
     SyncChannel::new();
 static HTTP_RESPONSE_CHANNEL: SyncChannel<CriticalSectionRawMutex, String, 1> = SyncChannel::new();
@@ -240,6 +264,8 @@ static UDP_DISCOVERY_ANNOUNCE_CHANNEL: SyncChannel<
 static MQTT_COMMAND_CHANNEL: SyncChannel<CriticalSectionRawMutex, MqttTaskCommand, 4> =
     SyncChannel::new();
 static MQTT_EVENT_CHANNEL: SyncChannel<CriticalSectionRawMutex, MqttTaskEvent, 8> =
+    SyncChannel::new();
+static BLE_SCAN_EVENT_CHANNEL: SyncChannel<CriticalSectionRawMutex, BleScanEventMessage, 16> =
     SyncChannel::new();
 static UDP_DISCOVERY_STARTED: Mutex<CriticalSectionRawMutex, bool> = Mutex::new(false);
 static MQTT_TASK_STARTED: AtomicBool = AtomicBool::new(false);
@@ -282,6 +308,72 @@ struct MqttTaskStatus {
 enum MqttTaskEvent {
     Status(MqttTaskStatus),
     RoomSummary(heapless::String<512>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BleScanEventMessage {
+    address: [u8; 6],
+    rssi: i8,
+    adv_data: heapless::Vec<u8, MAX_BLE_ADV_DATA_LEN>,
+    scan_data: heapless::Vec<u8, MAX_BLE_ADV_DATA_LEN>,
+}
+
+struct BleScanHandler {
+    last_adv: RefCell<Option<(TroubleAddress, heapless::Vec<u8, MAX_BLE_ADV_DATA_LEN>)>>,
+}
+
+impl BleScanHandler {
+    fn new() -> Self {
+        Self {
+            last_adv: RefCell::new(None),
+        }
+    }
+
+    fn handle_report(&self, address: TroubleAddress, rssi: i8, scan_response: bool, data: &[u8]) {
+        let mut copied = heapless::Vec::<u8, MAX_BLE_ADV_DATA_LEN>::new();
+        let max_len = data.len().min(MAX_BLE_ADV_DATA_LEN);
+        let _ = copied.extend_from_slice(&data[..max_len]);
+
+        let (adv_data, scan_data) = if scan_response {
+            let cached = self.last_adv.borrow_mut().take();
+            match cached {
+                Some((cached_address, cached_adv_data)) if cached_address == address => {
+                    (cached_adv_data, copied)
+                }
+                _ => return,
+            }
+        } else {
+            *self.last_adv.borrow_mut() = Some((address, copied.clone()));
+            (copied, heapless::Vec::new())
+        };
+
+        let _ = BLE_SCAN_EVENT_CHANNEL.try_send(BleScanEventMessage {
+            address: address.addr.into_inner(),
+            rssi,
+            adv_data,
+            scan_data,
+        });
+    }
+}
+
+impl TroubleEventHandler for BleScanHandler {
+    fn on_adv_reports(&self, reports: bt_hci::param::LeAdvReportsIter) {
+        for report in reports {
+            let Ok(report) = report else {
+                continue;
+            };
+
+            self.handle_report(
+                TroubleAddress {
+                    kind: report.addr_kind,
+                    addr: report.addr,
+                },
+                report.rssi,
+                report.event_kind == bt_hci::param::LeAdvEventKind::ScanRsp,
+                report.data,
+            );
+        }
+    }
 }
 
 struct SettingsStorage(FlashStorage<'static>);
@@ -479,6 +571,8 @@ impl<'ch> StatusLed<'ch> {
 #[derive(Debug, Clone)]
 struct FirmwareState {
     enabled: bool,
+    boot_count: u32,
+    last_reset_reason: String,
     wifi_ssid: String,
     wifi_password: String,
     mqtt_host: String,
@@ -550,17 +644,8 @@ struct FirmwareState {
     firmware_sync_state: FirmwareSyncState,
     last_udp_discovery_announce_ms: u32,
     udp_discovery_peers: Vec<UdpDiscoveryPeerState>,
+    ble_sightings: Vec<BleBeaconSightingState>,
     ble_identity_tags: Vec<BleIdentityTagState>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct BleIdentityTagState {
-    occupied: bool,
-    label: String,
-    address: String,
-    min_rssi: i32,
-    last_rssi: i32,
-    last_seen_ms: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -589,6 +674,8 @@ impl Default for FirmwareState {
     fn default() -> Self {
         Self {
             enabled: true,
+            boot_count: 0,
+            last_reset_reason: String::from("unknown"),
             wifi_ssid: String::new(),
             wifi_password: String::new(),
             mqtt_host: String::new(),
@@ -660,6 +747,7 @@ impl Default for FirmwareState {
             firmware_sync_state: FirmwareSyncState::default(),
             last_udp_discovery_announce_ms: 0,
             udp_discovery_peers: Vec::new(),
+            ble_sightings: default_ble_sightings(),
             ble_identity_tags: default_ble_identity_tags(),
         }
     }
@@ -908,11 +996,20 @@ impl FirmwareState {
         self.firmware_sync_state.target_version = target_core.clone();
         self.firmware_sync_state.target_node_id = String::from(target_node_id);
         self.firmware_sync_state.target_source = String::from(target_source);
-        self.firmware_sync_state.download_url.clear();
+        self.firmware_sync_state.download_url = firmware_release_asset_url(
+            FIRMWARE_RELEASE_REPO_OWNER,
+            FIRMWARE_RELEASE_REPO_NAME,
+            &target_core,
+            RUST_BUILD_TARGET,
+        );
         self.firmware_sync_state.last_error.clear();
         self.firmware_sync_state.status = {
-            let mut status = String::from("Queued firmware sync to ");
+            let mut status = String::from("Queued firmware sync to release ");
             status.push_str(&target_core);
+            if !self.firmware_sync_state.download_url.is_empty() {
+                status.push_str(" for ");
+                status.push_str(RUST_BUILD_TARGET);
+            }
             status
         };
     }
@@ -954,9 +1051,18 @@ impl FirmwareState {
 
         self.firmware_sync_state.pending = false;
         self.firmware_sync_state.last_success = false;
-        self.firmware_sync_state.last_error = String::from("not_implemented");
-        self.firmware_sync_state.status =
-            String::from("Firmware sync is not implemented in the Rust firmware yet.");
+        self.firmware_sync_state.last_started_ms = uptime_ms;
+        if self.firmware_sync_state.download_url.is_empty() {
+            self.firmware_sync_state.last_error = String::from("release_download_url_missing");
+            self.firmware_sync_state.status = String::from(
+                "Rust firmware sync could not resolve a GitHub release asset URL for this board target.",
+            );
+        } else {
+            self.firmware_sync_state.last_error = String::from("download_and_apply_not_implemented");
+            self.firmware_sync_state.status = String::from(
+                "Rust firmware sync resolved the GitHub release asset URL but does not download and apply firmware yet.",
+            );
+        }
         self.firmware_sync_state.last_completed_ms = uptime_ms;
     }
 
@@ -1557,6 +1663,8 @@ impl FirmwareState {
         DeviceSnapshot {
             enabled: self.enabled,
             configured: self.home_assistant_configured(),
+            boot_count: self.boot_count,
+            last_reset_reason: self.last_reset_reason.clone(),
             wifi_ssid: self.wifi_ssid.clone(),
             mqtt_host: self.mqtt_host.clone(),
             mqtt_port: self.mqtt_port,
@@ -1683,14 +1791,36 @@ impl FirmwareState {
                 }
             },
             room_peers: self.active_room_peers(uptime_ms),
-            ble_beacon_count: 0,
-            ble_beacons: alloc::vec::Vec::<BleBeaconSnapshot>::new(),
+            ble_beacon_count: self.active_ble_beacon_count(uptime_ms),
+            ble_beacons: self.ble_beacon_snapshots(uptime_ms),
             ble_tagged_people_count: self.active_ble_tag_count(uptime_ms),
             ble_tags: self.ble_tag_snapshots(uptime_ms),
             latest_energy_frame: self.latest_energy_frame.clone(),
             latest_text_frame: self.latest_text_frame.clone(),
             latest_generic_frame: self.latest_generic_frame.clone(),
         }
+    }
+
+    fn active_ble_beacon_count(&self, uptime_ms: u32) -> u16 {
+        self.ble_sightings
+            .iter()
+            .filter(|sighting| ble_beacon_sighting_active(sighting, uptime_ms))
+            .count()
+            .min(u16::MAX as usize) as u16
+    }
+
+    fn ble_beacon_snapshots(&self, uptime_ms: u32) -> Vec<BleBeaconSnapshot> {
+        self.ble_sightings
+            .iter()
+            .filter(|sighting| ble_beacon_sighting_active(sighting, uptime_ms))
+            .map(|sighting| BleBeaconSnapshot {
+                address: sighting.address.clone(),
+                name: sighting.name.clone(),
+                service_uuid: sighting.service_uuid.clone(),
+                rssi: sighting.rssi,
+                age_ms: uptime_ms.saturating_sub(sighting.last_seen_ms),
+            })
+            .collect()
     }
 
     fn active_ble_tag_count(&self, uptime_ms: u32) -> u16 {
@@ -1796,8 +1926,8 @@ async fn station_udp_discovery_task(stack: NetStack<'static>) -> ! {
 
 #[embassy_executor::task]
 async fn station_mqtt_summary_task(stack: NetStack<'static>) -> ! {
-    let rx_buffer = STATION_MQTT_RX_BUFFER.init([0; 2048]);
-    let tx_buffer = STATION_MQTT_TX_BUFFER.init([0; 2048]);
+    let rx_buffer = STATION_MQTT_RX_BUFFER.init([0; MQTT_SOCKET_BUFFER_SIZE]);
+    let tx_buffer = STATION_MQTT_TX_BUFFER.init([0; MQTT_SOCKET_BUFFER_SIZE]);
     let mut read_buffer = [0_u8; 512];
     let mut inbound = heapless::Vec::<u8, 2048>::new();
     let mut config = MqttTaskConfig::default();
@@ -2010,22 +2140,60 @@ async fn ap_dhcp_task(stack: NetStack<'static>) -> ! {
 
 #[embassy_executor::task]
 async fn ap_http_server_task(stack: NetStack<'static>) -> ! {
-    let rx_buffer = AP_HTTP_RX_BUFFER.init([0; 4096]);
-    let tx_buffer = AP_HTTP_TX_BUFFER.init([0; 4096]);
+    let rx_buffer = AP_HTTP_RX_BUFFER.init([0; HTTP_SOCKET_BUFFER_SIZE]);
+    let tx_buffer = AP_HTTP_TX_BUFFER.init([0; HTTP_SOCKET_BUFFER_SIZE]);
     serve_http_connections(stack, rx_buffer, tx_buffer).await
 }
 
 #[embassy_executor::task]
 async fn station_http_server_task(stack: NetStack<'static>) -> ! {
-    let rx_buffer = STATION_HTTP_RX_BUFFER.init([0; 4096]);
-    let tx_buffer = STATION_HTTP_TX_BUFFER.init([0; 4096]);
+    let rx_buffer = STATION_HTTP_RX_BUFFER.init([0; HTTP_SOCKET_BUFFER_SIZE]);
+    let tx_buffer = STATION_HTTP_TX_BUFFER.init([0; HTTP_SOCKET_BUFFER_SIZE]);
     serve_http_connections(stack, rx_buffer, tx_buffer).await
+}
+
+#[embassy_executor::task]
+async fn ble_scanner_task(bluetooth: esp_hal::peripherals::BT<'static>) -> ! {
+    let connector = match esp_radio::ble::controller::BleConnector::new(bluetooth, Default::default()) {
+        Ok(connector) => connector,
+        Err(_) => loop {
+            Timer::after(Duration::from_secs(5)).await;
+        },
+    };
+
+    let controller: ExternalController<_, 4> = ExternalController::new(connector);
+    let mut resources: HostResources<DefaultPacketPool, 1, 1> = HostResources::new();
+    let stack = trouble_host::new(controller, &mut resources)
+        .set_random_address(TroubleAddress::random([0x3c, 0xdc, 0x75, 0x71, 0x53, 0xdd]));
+    let host = stack.build();
+    let central = host.central;
+    let mut runner = host.runner;
+    let handler = BleScanHandler::new();
+    let mut scanner = Scanner::new(central);
+
+    let _ = join(runner.run_with_handler(&handler), async {
+        let mut config = BleScanConfig::default();
+        config.active = false;
+        config.phys = PhySet::M1;
+        config.interval = Duration::from_millis(BLE_SCAN_INTERVAL_MS);
+        config.window = Duration::from_millis(BLE_SCAN_WINDOW_MS);
+        let mut _session = scanner.scan(&config).await.unwrap();
+
+        loop {
+            Timer::after(Duration::from_secs(1)).await;
+        }
+    })
+    .await;
+
+    loop {
+        Timer::after(Duration::from_secs(5)).await;
+    }
 }
 
 async fn serve_http_connections(
     stack: NetStack<'static>,
-    rx_buffer: &'static mut [u8; 4096],
-    tx_buffer: &'static mut [u8; 4096],
+    rx_buffer: &'static mut [u8; HTTP_SOCKET_BUFFER_SIZE],
+    tx_buffer: &'static mut [u8; HTTP_SOCKET_BUFFER_SIZE],
 ) -> ! {
     let mut socket = TcpSocket::new(stack, rx_buffer, tx_buffer);
 
@@ -2099,7 +2267,7 @@ async fn serve_http_connections(
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::_80MHz));
     esp_alloc::heap_allocator!(size: 192 * 1024);
     let presence_config = match BOARD_PROFILE.radar_presence_pin_mode {
         PresencePinMode::Input => InputConfig::default(),
@@ -2126,18 +2294,23 @@ async fn main(spawner: Spawner) {
     let mut status_led = StatusLed::new(led_channel);
     let boot_started = Instant::now();
     let mut state = FirmwareState::default();
+    state.last_reset_reason = format_soc_reset_reason(reset_reason(Cpu::ProCpu));
     let mut base_mac_address = [0_u8; 6];
     base_mac_address.copy_from_slice(efuse::base_mac_address().as_bytes());
     state.initialize_device_identity(base_mac_address);
     let mut settings = open_settings_nvs(peripherals.FLASH).ok();
     if let Some(settings) = settings.as_mut() {
         load_persisted_config(&mut state, settings);
+        state.boot_count = state.boot_count.saturating_add(1);
+        persist_boot_diagnostics(settings, &state);
     }
     state.initialize_device_identity(base_mac_address);
     let mut wifi_device: Option<esp_hal::peripherals::WIFI<'static>> = Some(peripherals.WIFI);
+    let mut bluetooth_device: Option<esp_hal::peripherals::BT<'static>> = Some(peripherals.BT);
     let mut wifi_controller = None;
     let mut ap_stack = None;
     let mut station_stack = None;
+    let mut ble_scanner_started = false;
     let mut command_buffer = heapless::Vec::<u8, 256>::new();
     #[cfg(feature = "usb-console")]
     let mut last_runtime_debug_line = String::new();
@@ -2176,8 +2349,17 @@ async fn main(spawner: Spawner) {
             now,
         )
         .await;
+        if ENABLE_BLE_SCANNER_TASK && !ble_scanner_started && state.wifi_connected {
+            if let Some(bluetooth) = bluetooth_device.take() {
+                if let Ok(task) = ble_scanner_task(bluetooth) {
+                    spawner.spawn(task);
+                    ble_scanner_started = true;
+                }
+            }
+        }
         process_udp_discovery(&mut state, station_stack, now);
         process_mqtt_runtime(&mut state, now);
+        process_ble_scan_events(&mut state, now);
         state.service_firmware_sync(now);
         process_pending_http_request(
             &mut state,
@@ -2289,7 +2471,7 @@ async fn poll_wifi_runtime(
 
         match radio_wifi::new(device, controller_config) {
             Ok((mut controller, interfaces)) => {
-                if ap_stack.is_none() {
+                if wifi_runs_access_point(state) && ap_stack.is_none() {
                     match start_ap_network_runtime(spawner, interfaces.access_point) {
                         Ok(stack) => {
                             *ap_stack = Some(stack);
@@ -2300,6 +2482,8 @@ async fn poll_wifi_runtime(
                             return;
                         }
                     }
+                } else if !wifi_runs_access_point(state) {
+                    *ap_stack = None;
                 }
 
                 if station_stack.is_none() {
@@ -2430,6 +2614,7 @@ async fn attempt_wifi_connect(
     .await
     {
         Ok(Ok(info)) => {
+            let _ = controller.set_power_saving(PowerSaveMode::Maximum);
             state.wifi_connected = true;
             state.wifi_disconnect_reason = 0;
             state.wifi_disconnect_reason_text = String::from("connected");
@@ -2450,7 +2635,6 @@ async fn attempt_wifi_connect(
 
     state.last_wifi_attempt_ms = uptime_ms;
 }
-
 fn build_radio_config(state: &FirmwareState) -> RadioWifiConfig {
     let access_point_config = AccessPointConfig::default()
         .with_ssid(state.access_point_ssid())
@@ -2458,10 +2642,14 @@ fn build_radio_config(state: &FirmwareState) -> RadioWifiConfig {
         .with_auth_method(WifiAuthenticationMethod::Wpa2Personal);
 
     if state.home_assistant_configured() {
-        RadioWifiConfig::AccessPointStation(build_station_config(state), access_point_config)
+        RadioWifiConfig::Station(build_station_config(state))
     } else {
         RadioWifiConfig::AccessPoint(access_point_config)
     }
+}
+
+fn wifi_runs_access_point(state: &FirmwareState) -> bool {
+    !state.home_assistant_configured()
 }
 
 fn start_ap_network_runtime(spawner: &Spawner, interface: WifiInterface<'static>) -> Result<NetStack<'static>, String> {
@@ -2552,6 +2740,25 @@ fn process_mqtt_runtime(state: &mut FirmwareState, uptime_ms: u32) {
                 state.last_mqtt_room_summary_publish_ms = uptime_ms;
             }
         }
+    }
+}
+
+fn process_ble_scan_events(state: &mut FirmwareState, uptime_ms: u32) {
+    while let Ok(event) = BLE_SCAN_EVENT_CHANNEL.try_receive() {
+        let address = format_ble_address(event.address);
+        let name = extract_ble_local_name(event.adv_data.as_slice(), event.scan_data.as_slice());
+        let service_uuid =
+            extract_ble_service_uuid(event.adv_data.as_slice(), event.scan_data.as_slice());
+
+        record_ble_advertisement(
+            state.ble_sightings.as_mut_slice(),
+            state.ble_identity_tags.as_mut_slice(),
+            address.as_str(),
+            name.as_str(),
+            service_uuid.as_str(),
+            i32::from(event.rssi),
+            uptime_ms,
+        );
     }
 }
 
@@ -3899,6 +4106,9 @@ fn load_persisted_config(state: &mut FirmwareState, settings: &mut SettingsNvs) 
     if let Ok(value) = settings.get::<u8>(&SETTINGS_NAMESPACE, &SETTINGS_KEY_LED_BRI) {
         state.led_brightness = value.max(1);
     }
+    if let Ok(value) = settings.get::<u32>(&SETTINGS_NAMESPACE, &SETTINGS_KEY_BOOT_COUNT) {
+        state.boot_count = value;
+    }
 
     for slot in 0..MAX_BLE_TAGS {
         let (label_key, address_key, rssi_key) = ble_tag_key_strings(slot);
@@ -3934,6 +4144,10 @@ fn load_persisted_config(state: &mut FirmwareState, settings: &mut SettingsNvs) 
     if !state.home_assistant_configured() {
         state.mark_wifi_disconnected(DEFAULT_WIFI_NOT_CONFIGURED_REASON_TEXT);
     }
+}
+
+fn persist_boot_diagnostics(settings: &mut SettingsNvs, state: &FirmwareState) {
+    let _ = settings.set(&SETTINGS_NAMESPACE, &SETTINGS_KEY_BOOT_COUNT, state.boot_count);
 }
 
 fn persist_runtime_config(settings: Option<&mut SettingsNvs>, state: &FirmwareState) {
@@ -3994,6 +4208,14 @@ fn persist_runtime_config(settings: Option<&mut SettingsNvs>, state: &FirmwareSt
     }
 }
 
+fn default_ble_sightings() -> Vec<BleBeaconSightingState> {
+    let mut sightings = Vec::with_capacity(MAX_BLE_SIGHTINGS);
+    for _ in 0..MAX_BLE_SIGHTINGS {
+        sightings.push(BleBeaconSightingState::default());
+    }
+    sightings
+}
+
 fn default_ble_identity_tags() -> Vec<BleIdentityTagState> {
     let mut tags = Vec::with_capacity(MAX_BLE_TAGS);
     for _ in 0..MAX_BLE_TAGS {
@@ -4009,29 +4231,40 @@ fn default_ble_identity_tags() -> Vec<BleIdentityTagState> {
     tags
 }
 
-fn clear_ble_identity_tag(tag: &mut BleIdentityTagState) {
-    tag.occupied = false;
-    tag.label.clear();
-    tag.address.clear();
-    tag.min_rssi = BLE_TAG_DEFAULT_MIN_RSSI;
-    tag.last_rssi = -127;
-    tag.last_seen_ms = 0;
+fn format_ble_address(raw: [u8; 6]) -> String {
+    let mut address = String::new();
+    let _ = core::fmt::write(
+        &mut address,
+        format_args!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            raw[5], raw[4], raw[3], raw[2], raw[1], raw[0]
+        ),
+    );
+    address
 }
 
-fn ble_identity_tag_present(tag: &BleIdentityTagState, uptime_ms: u32) -> bool {
-    tag.occupied && tag.last_seen_ms > 0 && uptime_ms.saturating_sub(tag.last_seen_ms) <= BLE_TAG_FRESHNESS_MS
-}
-
-fn normalize_ble_identity_value(value: &str) -> String {
-    let mut normalized = String::new();
-    for ch in value.chars() {
-        match ch {
-            'A'..='F' => normalized.push(((ch as u8) - b'A' + b'a') as char),
-            'a'..='f' | '0'..='9' => normalized.push(ch),
-            _ => {}
-        }
-    }
-    normalized
+fn format_soc_reset_reason(reason: Option<SocResetReason>) -> String {
+    String::from(match reason {
+        Some(SocResetReason::ChipPowerOn) => "chip_power_on",
+        Some(SocResetReason::CoreSw) => "core_sw",
+        Some(SocResetReason::CoreDeepSleep) => "core_deep_sleep",
+        Some(SocResetReason::CoreMwdt0) => "core_mwdt0",
+        Some(SocResetReason::CoreMwdt1) => "core_mwdt1",
+        Some(SocResetReason::CoreRtcWdt) => "core_rtc_wdt",
+        Some(SocResetReason::CpuMwdt0) => "cpu_mwdt0",
+        Some(SocResetReason::CpuSw) => "cpu_sw",
+        Some(SocResetReason::CpuRtcWdt) => "cpu_rtc_wdt",
+        Some(SocResetReason::SysBrownOut) => "sys_brownout",
+        Some(SocResetReason::SysRtcWdt) => "sys_rtc_wdt",
+        Some(SocResetReason::CpuMwdt1) => "cpu_mwdt1",
+        Some(SocResetReason::SysSuperWdt) => "sys_super_wdt",
+        Some(SocResetReason::SysClkGlitch) => "sys_clk_glitch",
+        Some(SocResetReason::CoreEfuseCrc) => "core_efuse_crc",
+        Some(SocResetReason::CoreUsbUart) => "core_usb_uart",
+        Some(SocResetReason::CoreUsbJtag) => "core_usb_jtag",
+        Some(SocResetReason::CorePwrGlitch) => "core_pwr_glitch",
+        None => "unknown",
+    })
 }
 
 fn ble_tag_key_strings(slot: usize) -> (String, String, String) {

@@ -2,6 +2,26 @@
 
 Portable ESP32 mmWave presence and telemetry firmware with a hosted diagnostics UI, BLE observation, room fusion, and Home Assistant/MQTT integration.
 
+EspWaveRider ships a production-oriented C++ firmware today and a bare-metal Rust ESP32-S3 port that is being driven against the same external contracts with parity tests, live burn-in, and A/B benchmarks.
+
+## Quick start
+
+1. Install dependencies with `npm ci`.
+2. Build or flash the C++ firmware for your board.
+3. Open the hosted dashboard or `GET /api/snapshot`.
+4. Provision Wi-Fi, MQTT, node identity, room placement, and tuning.
+5. Verify peer discovery, MQTT, and release-target metadata before deploying more nodes.
+
+Start here for the full path:
+
+- `docs/install.md`: prerequisites and build/flash commands
+- `docs/getting-started.md`: first boot, provisioning, validation, and common operator checks
+- `docs/configuration.md`: wiring, provisioning, room, BLE, and tuning configuration
+- `docs/operations.md`: dashboard, peer discovery, firmware sync, and troubleshooting
+- `docs/parity-matrix.md`: validated C++ vs Rust feature status
+- `docs/benchmarks-and-comparison.md`: current C++ vs Rust benchmark and size comparison
+- `docs/release-guide.md`: release process, asset naming, and release quality bar
+
 The repo is structured so hardware wiring can be remapped without editing application logic. The normal workflow is: choose a PlatformIO environment, optionally override a few board macros, then build and flash.
 
 ## Documentation
@@ -21,12 +41,32 @@ The repo is structured so hardware wiring can be remapped without editing applic
 - Detects peer firmware mismatches and exposes the highest visible peer release for safe OTA sync
 - Supports board-specific wiring through a small HAL layer
 
+## Feature matrix
+
+| Area | C++ firmware | Rust ESP32-S3 port | Notes |
+| --- | --- | --- | --- |
+| Hosted dashboard and snapshot API | Yes | Yes | Rust serves the same device UI and snapshot surface |
+| Wi-Fi station runtime | Yes | Yes | Rust is currently validated in station-only configured runtime |
+| SoftAP provisioning fallback | Yes | Yes | Rust keeps SoftAP for the unconfigured path |
+| MQTT over TCP | Yes | Yes | Validated live on the Rust board |
+| MQTT over WebSockets | Yes | Config only | Rust stores endpoint config but does not run WS MQTT transport yet |
+| UDP peer discovery | Yes | Yes | Stable in both directions in the latest burn-in window |
+| Room-summary collaboration | Yes | Yes | Stable in both directions in the latest burn-in window |
+| OTA apply | Yes | Partial | Rust resolves targets and state but does not apply firmware yet |
+| BLE observation | Yes | Partial | Rust scanner code exists but is runtime-gated off for stability |
+
+For row-by-row status and evidence, see `docs/parity-matrix.md`.
+
 ## Supported environments
 
-- `esp32-s3-devkitm-1`: validated primary target
-- `esp32dev-uart1`: generic ESP32 example target
-- `heltec-wifi-lora-32-v3`: Heltec WiFi LoRa 32 V3 target
-- `heltec-wifi-lora-32-v4`: Heltec WiFi LoRa 32 V4-compatible target
+| PlatformIO environment | Published release target | Status |
+| --- | --- | --- |
+| `esp32-s3-devkitm-1` | `lonely-esp32-s3-devkitm-1` | Validated primary target |
+| `esp32dev-uart1` | `esp32-generic-uart1` | Generic ESP32 example target |
+| `heltec-wifi-lora-32-v3` | `heltec-wifi-lora-32-v3` | Supported |
+| `heltec-wifi-lora-32-v4` | `heltec-wifi-lora-32-v4-compatible` | V4-compatible profile |
+
+Release assets intentionally use board-specific target names instead of raw PlatformIO environment IDs.
 
 ## Hardware abstraction
 
@@ -105,9 +145,28 @@ Upload the primary target:
 C:\Users\jd\.platformio\penv\Scripts\platformio.exe run --environment esp32-s3-devkitm-1 --target upload --upload-port COM17
 ```
 
+Run the automated C++ vs Rust device benchmark collector:
+
+```powershell
+& '.\scripts\collect-ab-benchmarks.ps1'
+```
+
+## C++ vs Rust summary
+
+Current validated position:
+
+- C++ remains the production baseline across the full shipping feature set.
+- Rust has strong parity on snapshot, command parsing, room collaboration, UDP discovery, MQTT over TCP, and the hosted diagnostics surface.
+- Rust still has two meaningful gaps before it can claim production equivalence: OTA apply and stable BLE scanning.
+- On the latest A/B device benchmark run, Rust won 5 of 6 measured slices and C++ held a slight lead only on `detection_candidate_fixture`.
+- Current size snapshot on the primary board is approximately `1063.5 KB` for the Rust ELF and `1359.97 KB` for the C++ BIN.
+
+See `docs/benchmarks-and-comparison.md` for the current benchmark table, size report, and methodology.
+
 ## Testing
 
 - Firmware build validation is handled through PlatformIO environments.
+- `scripts/collect-ab-benchmarks.ps1` uploads the C++ image, runs `runtime_benchmark` over HTTP, builds and flashes the Rust benchmark image, captures the Rust serial benchmark lines, writes `artifacts/ab-benchmark-latest.json`, and restores the C++ image on the test board.
 - `npm run test:unit` runs fast Python unit tests for the firmware metadata and visualizer embedding helpers.
 - `npm run test:integration` runs Python integration tests that verify HTML embedding/header generation behavior.
 - Browser-based `e2e/` Playwright coverage is split into two lanes:
@@ -118,12 +177,31 @@ C:\Users\jd\.platformio\penv\Scripts\platformio.exe run --environment esp32-s3-d
 - The release pipeline also runs the Python unit tests, Python integration tests, and offline dashboard Playwright suite before semantic release publishes versioned artifacts.
 - The manual `hardware-e2e` workflow is available for self-hosted runners that can reach real devices.
 
+The short version is:
+
+- `npm run test:unit`: Python unit coverage for embed/build metadata helpers
+- `npm run test:integration`: Python integration coverage for hosted UI embedding
+- `npm run test:e2e:offline`: hosted-safe UI workflow coverage
+- `npm run docs:build`: local DocFX validation for docs and internal links
+- `npm run release:preview`: semantic-release dry-run for next-version and release-note preview
+- `scripts/collect-ab-benchmarks.ps1`: cross-language benchmark collection on real hardware
+- `docs/parity-matrix.md`: current validated feature-status source of truth
+
+CI also uploads a rendered `docs/_site` preview artifact for documentation changes so reviewers can inspect the generated site before merge.
+
 ## Releases
 
 - Releases are created automatically from commits on `main` using conventional commit messages.
 - Versioning rules are semantic: `feat:` produces a minor release, `fix:` and `perf:` produce patch releases, and `BREAKING CHANGE:` or `!` produces a major release.
 - A successful release run creates a GitHub release tag like `v1.2.3`, updates `CHANGELOG.md`, and publishes board-specific firmware binaries for every supported PlatformIO environment.
-- Published release assets use the form `EspWaveRider-<version>-<environment>.bin` plus a matching `.sha256` checksum file.
+- Published release assets use explicit board targets, not raw PlatformIO environment IDs. Current names are:
+- `EspWaveRider-<version>-lonely-esp32-s3-devkitm-1.bin`
+- `EspWaveRider-<version>-esp32-generic-uart1.bin`
+- `EspWaveRider-<version>-heltec-wifi-lora-32-v3.bin`
+- `EspWaveRider-<version>-heltec-wifi-lora-32-v4-compatible.bin`
+- Each published binary also includes a matching `.sha256` checksum file.
+
+If you are deploying from GitHub Releases, match the published release target exactly. Do not treat the primary `lonely-esp32-s3-devkitm-1` binary as a generic ESP32-S3 image.
 
 ## Versioning and firmware sync
 
@@ -139,6 +217,7 @@ Manual command examples:
 ```text
 firmware_sync
 firmware_update:v1.0.0
+runtime_benchmark
 ```
 
 Example commit subjects:
@@ -156,6 +235,8 @@ Example commit subjects:
 - `platformio.ini`: PlatformIO environments
 - `scripts/embed_visualizer.py`: embeds the hosted UI into firmware
 - `e2e/`: hardware-backed Playwright coverage
+- `docs/`: operator and release documentation
+- `rust/`: bare-metal Rust port workspace and shared parity crates
 
 ## Publishing notes
 

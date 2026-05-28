@@ -159,6 +159,10 @@ pub struct RuntimeBenchmarkSnapshot {
 pub struct DeviceSnapshot {
     pub enabled: bool,
     pub configured: bool,
+    #[serde(default)]
+    pub boot_count: u32,
+    #[serde(default)]
+    pub last_reset_reason: String,
     pub wifi_ssid: String,
     pub mqtt_host: String,
     pub mqtt_port: u16,
@@ -264,6 +268,8 @@ mod tests {
         DeviceSnapshot {
             enabled: true,
             configured: true,
+            boot_count: 12,
+            last_reset_reason: "cpu_mwdt1".into(),
             wifi_ssid: "JDH-IoT".into(),
             mqtt_host: "10.0.107.46".into(),
             mqtt_port: 1883,
@@ -272,7 +278,7 @@ mod tests {
             mqtt_host_header: String::new(),
             mqtt_username_set: true,
             firmware_version: "v1.0.1".into(),
-            build_target: "esp32-s3-devkitm-1".into(),
+            build_target: "lonely-esp32-s3-devkitm-1".into(),
             git_sha: "4b1a5fc".into(),
             node_id: "lb_mmwave_presence_test2".into(),
             friendly_name: "LB mmWav979e7 Presence Test 2".into(),
@@ -429,7 +435,7 @@ mod tests {
             snapshot.firmware(),
             FirmwareMetadata {
                 version: "v1.0.1".into(),
-                build_target: "esp32-s3-devkitm-1".into(),
+                build_target: "lonely-esp32-s3-devkitm-1".into(),
                 git_sha: "4b1a5fc".into(),
             }
         );

@@ -17,11 +17,16 @@ extern bool dnsServerStarted;
 String buildDeviceSnapshotJson(int32_t energySince = -1,
                                int32_t textSince = -1,
                                int32_t genericSince = -1);
+String buildDebugStatusJson();
 void handleUsbCommand(const String& command);
 
 void handleHttpCommand() {
   String command = DeviceWebServer.arg("plain");
   command.trim();
+  if (command == "debug_status") {
+    DeviceWebServer.send(200, "application/json", buildDebugStatusJson());
+    return;
+  }
   if (command.length() > 0) {
     handleUsbCommand(command);
   }

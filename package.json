@@ -3,6 +3,9 @@
   "private": true,
   "scripts": {
     "release": "semantic-release",
+    "release:preview": "semantic-release --dry-run --no-ci",
+    "docs:build": "docfx docs/docfx.json",
+    "report:firmware-sizes": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/report-firmware-sizes.ps1",
     "test:unit": "python -m unittest discover -s test -p \"test_*_unit.py\" -v",
     "test:integration": "python -m unittest discover -s test -p \"test_*_integration.py\" -v",
     "test:e2e": "playwright test",

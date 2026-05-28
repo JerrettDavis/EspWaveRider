@@ -4,12 +4,7 @@
     "content": [
       {
         "files": [
-          "index.md",
-          "install.md",
-          "configuration.md",
-          "operations.md",
-          "api.md",
-          "testing-and-release.md",
+          "**/*.md",
           "toc.yml"
         ]
       }

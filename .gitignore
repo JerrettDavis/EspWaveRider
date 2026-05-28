@@ -35,6 +35,7 @@ Thumbs.db
 build/
 dist/
 coverage/
+rust/target/
 *.bin
 *.elf
 *.map

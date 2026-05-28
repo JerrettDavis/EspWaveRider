@@ -1,15 +1,14 @@
 #include "string_utils.h"
 
-#include <cstdio>
-
 String buildHexString(const uint8_t* data, size_t length) {
+  static constexpr char kHexDigits[] = "0123456789ABCDEF";
   String hex;
   hex.reserve(length * 2);
 
   for (size_t i = 0; i < length; i++) {
-    char buffer[3];
-    snprintf(buffer, sizeof(buffer), "%02X", data[i]);
-    hex += buffer;
+    uint8_t value = data[i];
+    hex += kHexDigits[(value >> 4) & 0x0F];
+    hex += kHexDigits[value & 0x0F];
   }
 
   return hex;

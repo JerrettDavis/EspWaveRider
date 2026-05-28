@@ -12,6 +12,27 @@ permissions:
   pull-requests: write
 
 jobs:
+  docs-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install DocFX
+        run: dotnet tool update --global docfx
+
+      - name: Add global .NET tools to PATH
+        run: echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Build docs site
+        run: docfx docs/docfx.json
+
   python-unit-tests:
     runs-on: ubuntu-latest
 
@@ -75,6 +96,7 @@ jobs:
 
   semantic-release:
     needs:
+      - docs-build
       - python-unit-tests
       - python-integration-tests
       - e2e-offline-dashboard
@@ -114,11 +136,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment:
-          - esp32-s3-devkitm-1
-          - esp32dev-uart1
-          - heltec-wifi-lora-32-v3
-          - heltec-wifi-lora-32-v4
+        include:
+          - environment: esp32-s3-devkitm-1
+            release_target: lonely-esp32-s3-devkitm-1
+          - environment: esp32dev-uart1
+            release_target: esp32-generic-uart1
+          - environment: heltec-wifi-lora-32-v3
+            release_target: heltec-wifi-lora-32-v3
+          - environment: heltec-wifi-lora-32-v4
+            release_target: heltec-wifi-lora-32-v4-compatible
 
     steps:
       - name: Checkout release tag
@@ -153,8 +179,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.environment }}.bin"
-          sha256sum "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.environment }}.bin" > "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.environment }}.sha256"
+          cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.release_target }}.bin"
+          sha256sum "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.release_target }}.bin" > "dist/EspWaveRider-${{ needs.semantic-release.outputs.version }}-${{ matrix.release_target }}.sha256"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

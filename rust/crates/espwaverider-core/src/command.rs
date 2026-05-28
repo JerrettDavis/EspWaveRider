@@ -245,6 +245,7 @@ impl<'a> DeviceCommand<'a> {
             _ => Err(CommandPayloadParseError::new("command is not ble_tag_clear")),
         }
     }
+
 }
 
 pub fn parse_home_assistant_config_payload(
@@ -629,6 +630,7 @@ mod tests {
             BleTagClearPayload { slot: 2 }
         );
     }
+
 
     #[test]
     fn applies_ble_tag_default_min_rssi_and_clamps() {

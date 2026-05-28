@@ -2,13 +2,19 @@
   href: index.md
 - name: Install
   href: install.md
+- name: Getting Started
+  href: getting-started.md
 - name: Configuration
   href: configuration.md
 - name: Operations
   href: operations.md
 - name: HTTP And Commands
   href: api.md
+- name: Benchmarks And Comparison
+  href: benchmarks-and-comparison.md
 - name: Parity Matrix
   href: parity-matrix.md
 - name: Testing And Releases
   href: testing-and-release.md
+- name: Release Guide
+  href: release-guide.md

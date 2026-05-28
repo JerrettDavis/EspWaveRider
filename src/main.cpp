@@ -13,6 +13,7 @@
 #include <WiFiUdp.h>
 #include <Adafruit_NeoPixel.h>
 #include <mbedtls/sha256.h>
+#include <cstring>
 #include <time.h>
 
 #ifndef ESPWAVERIDER_FIRMWARE_VERSION
@@ -25,6 +26,10 @@
 
 #ifndef ESPWAVERIDER_GIT_SHA
 #define ESPWAVERIDER_GIT_SHA "unknown"
+#endif
+
+#ifndef ESPWAVERIDER_USB_CONSOLE
+#define ESPWAVERIDER_USB_CONSOLE 1
 #endif
 
 #include "board_profile.h"
@@ -206,6 +211,13 @@ X5iItreGCc=
 
 static constexpr uint8_t ENERGY_HEADER[] = {0xF4, 0xF3, 0xF2, 0xF1};
 static constexpr uint8_t ENERGY_FOOTER[] = {0xF8, 0xF7, 0xF6, 0xF5};
+static constexpr size_t ENERGY_FRAME_LENGTH = 45;
+static constexpr uint32_t RUNTIME_BENCHMARK_ITERATIONS = 1000;
+static constexpr const char* RUNTIME_BENCHMARK_SIMPLE_COMMAND = "runtime_benchmark";
+static constexpr const char* RUNTIME_BENCHMARK_ROOM_CONFIG_PAYLOAD = "room-default|auto|50|25|-90|800|400";
+static constexpr const char* RUNTIME_BENCHMARK_TUNING_CONFIG_PAYLOAD = "0|0|500|-1|0|0|on|0";
+static constexpr const char* RUNTIME_BENCHMARK_GENERIC_FRAME_HEX = "110012000D000D000D00F8F7F6F5F4F3F2F123000169005257F113DD006801280014003A0014000D000A002000140011000D000D000A00F8F7F6F5F4F3F2F12300016900754AA511C901DD0048006400120049000D00140014001900110014000D000D00F8F7F6F5F4F3F2F12300016900A1414510610152001A001400120019001400110019001400140011000A001400F8F7F6F5F4F3F2F12300016900444B241328015A0028001D0050002D001A002900110014000D00110022001100F8F7F6F5";
+static constexpr uint16_t RUNTIME_BENCHMARK_ENERGY_GATES[LD2420_GATE_COUNT] = {12898, 3730, 362, 36, 80, 98, 20, 13, 13, 9, 10, 13, 20, 10, 13, 10};
 
 HardwareSerial RadarSerial(kBoardProfile.radarSerialPort);
 WiFiClient HomeAssistantWiFiClient;
@@ -287,6 +299,39 @@ struct LatestGenericFrameSnapshot {
   uint32_t framesTotal = 0;
   String hex;
   String ascii;
+};
+
+struct RuntimeBenchmarkMeasurement {
+  uint32_t totalUs = 0;
+  uint32_t perIterNs = 0;
+};
+
+struct RuntimeBenchmarkSnapshot {
+  bool valid = false;
+  uint32_t measuredAtMs = 0;
+  uint32_t iterations = 0;
+  RuntimeBenchmarkMeasurement parseCommandFixture;
+  RuntimeBenchmarkMeasurement parseRoomConfigFixture;
+  RuntimeBenchmarkMeasurement parseTuningConfigFixture;
+  RuntimeBenchmarkMeasurement parseGenericFixture;
+  RuntimeBenchmarkMeasurement deriveMetricsFixture;
+  RuntimeBenchmarkMeasurement detectionCandidateFixture;
+  bool detectionCandidate = false;
+  uint8_t peopleEstimate = 0;
+  uint8_t activeGateCount = 0;
+  uint8_t activityScore = 0;
+  int dominantGateDistanceCm = -1;
+};
+
+enum class RadarDetectionDecision : uint8_t {
+  Candidate = 0,
+  InvalidMetrics,
+  OutOfRange,
+  InsufficientActiveGates,
+  LowActivity,
+  MissingEnergyFrame,
+  LowEnergy,
+  NearFieldClutter,
 };
 
 struct RuntimeHomeAssistantConfig {
@@ -432,6 +477,7 @@ bool dnsServerStarted = false;
 bool mdnsStarted = false;
 bool udpDiscoveryStarted = false;
 FirmwareSyncState firmwareSyncState;
+RuntimeBenchmarkSnapshot latestRuntimeBenchmarkSnapshot;
 
 String usbCommandBuffer;
 uint32_t lastWiFiScanMs = 0;
@@ -459,8 +505,16 @@ void emitTextRangeFrame(const uint8_t* data, size_t length, const String& ascii)
 bool startsWithEnergyHeader(const uint8_t* data, size_t len);
 bool endsWithEnergyFooter(const uint8_t* data, size_t len);
 uint16_t readLe16(const uint8_t* data, size_t offset);
+size_t decodeHexBytes(const char* hex, uint8_t* output, size_t capacity);
+void buildGenericFrameSnapshot(const uint8_t* data, size_t length, LatestGenericFrameSnapshot& snapshot);
+bool parseLd2420EnergyFrame(const uint8_t* data, size_t len, LatestEnergyFrameSnapshot& snapshot);
 bool tryEmitLd2420EnergyFrame(const uint8_t* data, size_t len);
 bool tryEmitLd2420TextFrame(const uint8_t* data, size_t len);
+bool tryEmitEmbeddedLd2420EnergyFrames(const uint8_t* data, size_t len, size_t& consumedLength);
+uint8_t classifyBenchmarkCommand(const String& command);
+uint32_t parseBenchmarkRoomConfigPayload(const char* payload);
+uint32_t parseBenchmarkTuningConfigPayload(const char* payload);
+void runRuntimeBenchmark();
 
 void flushRadarBufferIfNeeded(bool force);
 void readRadarUart();
@@ -507,6 +561,7 @@ void ensureMdnsActive();
 String buildDeviceSnapshotJson(int32_t energySince = -1,
                                int32_t textSince = -1,
                                int32_t genericSince = -1);
+String buildDebugStatusJson();
 String defaultRoomId();
 String defaultSensorRole();
 String roomTopicRoot();
@@ -563,9 +618,21 @@ void publishHomeAssistantDiagnostics();
 void publishHomeAssistantDerivedMetrics();
 void publishHomeAssistantStates();
 RadarDerivedMetrics buildRadarDerivedMetrics();
+RadarDerivedMetrics buildRadarDerivedMetrics(const LatestEnergyFrameSnapshot* energyFrame,
+                                            const LatestTextFrameSnapshot* textFrame,
+                                            bool gpioPresence);
 uint16_t effectiveMinGateEnergy();
+uint16_t effectiveMinGateEnergy(const RuntimeHomeAssistantConfig& config);
 uint8_t effectiveMinActivityScore();
+uint8_t effectiveMinActivityScore(const RuntimeHomeAssistantConfig& config);
 bool radarDetectionCandidate(const RadarDerivedMetrics& metrics);
+bool radarDetectionCandidate(const RadarDerivedMetrics& metrics,
+                             const LatestEnergyFrameSnapshot* energyFrame,
+                             const RuntimeHomeAssistantConfig& config);
+RadarDetectionDecision radarDetectionDecision(const RadarDerivedMetrics& metrics);
+RadarDetectionDecision radarDetectionDecision(const RadarDerivedMetrics& metrics,
+                                              const LatestEnergyFrameSnapshot* energyFrame,
+                                              const RuntimeHomeAssistantConfig& config);
 uint16_t effectivePresenceHoldMs();
 uint32_t presenceDecayRemainingMs(uint32_t now);
 void updateStatusRgbLed(uint32_t now);
@@ -787,6 +854,44 @@ String buildDeviceSnapshotJson(int32_t energySince,
   json += ",\"dominant_gate_energy\":" + String(metrics.dominantGateEnergy);
   json += ",\"total_gate_energy\":" + String(metrics.totalGateEnergy);
   json += ",\"status_led_hex\":\"" + statusLedHex(ledColor) + "\"";
+  json += ",\"runtime_benchmark\":";
+  if (latestRuntimeBenchmarkSnapshot.valid) {
+    json += "{";
+    json += "\"measured_at_ms\":" + String(latestRuntimeBenchmarkSnapshot.measuredAtMs);
+    json += ",\"iterations\":" + String(latestRuntimeBenchmarkSnapshot.iterations);
+    json += ",\"parse_command_fixture\":{";
+    json += "\"total_us\":" + String(latestRuntimeBenchmarkSnapshot.parseCommandFixture.totalUs);
+    json += ",\"per_iter_ns\":" + String(latestRuntimeBenchmarkSnapshot.parseCommandFixture.perIterNs);
+    json += "}";
+    json += ",\"parse_room_config_fixture\":{";
+    json += "\"total_us\":" + String(latestRuntimeBenchmarkSnapshot.parseRoomConfigFixture.totalUs);
+    json += ",\"per_iter_ns\":" + String(latestRuntimeBenchmarkSnapshot.parseRoomConfigFixture.perIterNs);
+    json += "}";
+    json += ",\"parse_tuning_config_fixture\":{";
+    json += "\"total_us\":" + String(latestRuntimeBenchmarkSnapshot.parseTuningConfigFixture.totalUs);
+    json += ",\"per_iter_ns\":" + String(latestRuntimeBenchmarkSnapshot.parseTuningConfigFixture.perIterNs);
+    json += "}";
+    json += ",\"parse_generic_fixture\":{";
+    json += "\"total_us\":" + String(latestRuntimeBenchmarkSnapshot.parseGenericFixture.totalUs);
+    json += ",\"per_iter_ns\":" + String(latestRuntimeBenchmarkSnapshot.parseGenericFixture.perIterNs);
+    json += "}";
+    json += ",\"derive_metrics_fixture\":{";
+    json += "\"total_us\":" + String(latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.totalUs);
+    json += ",\"per_iter_ns\":" + String(latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.perIterNs);
+    json += "}";
+    json += ",\"detection_candidate_fixture\":{";
+    json += "\"total_us\":" + String(latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.totalUs);
+    json += ",\"per_iter_ns\":" + String(latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.perIterNs);
+    json += "}";
+    json += ",\"detection_candidate\":" + String(latestRuntimeBenchmarkSnapshot.detectionCandidate ? "true" : "false");
+    json += ",\"people_estimate\":" + String(latestRuntimeBenchmarkSnapshot.peopleEstimate);
+    json += ",\"active_gate_count\":" + String(latestRuntimeBenchmarkSnapshot.activeGateCount);
+    json += ",\"activity_score\":" + String(latestRuntimeBenchmarkSnapshot.activityScore);
+    json += ",\"dominant_gate_distance_cm\":" + String(latestRuntimeBenchmarkSnapshot.dominantGateDistanceCm);
+    json += "}";
+  } else {
+    json += "null";
+  }
 
   RoomAggregateMetrics roomMetrics = buildRoomAggregateMetrics();
   json += ",\"room_people_estimate\":" + String(roomMetrics.peopleEstimate);
@@ -850,6 +955,75 @@ String buildDeviceSnapshotJson(int32_t energySince,
     json += "null";
   }
 
+  json += "}";
+  return json;
+}
+
+const char* radarDetectionDecisionReason(RadarDetectionDecision decision) {
+  switch (decision) {
+    case RadarDetectionDecision::Candidate: return "radar_candidate";
+    case RadarDetectionDecision::InvalidMetrics: return "invalid_metrics";
+    case RadarDetectionDecision::OutOfRange: return "out_of_range";
+    case RadarDetectionDecision::InsufficientActiveGates: return "insufficient_active_gates";
+    case RadarDetectionDecision::LowActivity: return "low_activity";
+    case RadarDetectionDecision::MissingEnergyFrame: return "missing_energy_frame";
+    case RadarDetectionDecision::LowEnergy: return "low_energy";
+    case RadarDetectionDecision::NearFieldClutter: return "near_field_clutter";
+    default: return "unknown";
+  }
+}
+
+const char* statusLedPhase(uint32_t now) {
+  if (!runtimeConfig.ledEnabled) {
+    return "disabled";
+  }
+
+  if (detectionCandidateActive) {
+    return "active_detection";
+  }
+
+  if (presenceDecayRemainingMs(now) > 0) {
+    return "presence_decay";
+  }
+
+  return "idle";
+}
+
+String buildDebugStatusJson() {
+  RadarDerivedMetrics metrics = buildRadarDerivedMetrics();
+  const LatestEnergyFrameSnapshot* energyFrame = latestEnergyFrameSnapshot.valid ? &latestEnergyFrameSnapshot : nullptr;
+  const RadarDetectionDecision decision = radarDetectionDecision(metrics, energyFrame, runtimeConfig);
+  const bool gpioFallback = lastGpioPresence && !latestEnergyFrameSnapshot.valid && !latestTextFrameSnapshot.valid;
+  const bool radarCandidate = decision == RadarDetectionDecision::Candidate;
+  const uint32_t now = millis();
+
+  String json;
+  json.reserve(512);
+  json += "{";
+  json += "\"status_led_hex\":\"" + statusLedHex(statusLedColorForState(now)) + "\"";
+  json += ",\"led_phase\":\"" + String(statusLedPhase(now)) + "\"";
+  json += ",\"detection_reason\":\"";
+  json += gpioFallback && !radarCandidate ? "gpio_fallback" : radarDetectionDecisionReason(decision);
+  json += "\"";
+  json += ",\"detection_candidate\":";
+  json += detectionCandidateActive ? "true" : "false";
+  json += ",\"presence\":";
+  json += lastPresence ? "true" : "false";
+  json += ",\"gpio_presence\":";
+  json += lastGpioPresence ? "true" : "false";
+  json += ",\"radar_candidate\":";
+  json += radarCandidate ? "true" : "false";
+  json += ",\"gpio_fallback\":";
+  json += gpioFallback ? "true" : "false";
+  json += ",\"clutter_suppressed\":";
+  json += decision == RadarDetectionDecision::NearFieldClutter ? "true" : "false";
+  json += ",\"presence_decay_remaining_ms\":" + String(presenceDecayRemainingMs(now));
+  json += ",\"effective_min_gate_energy\":" + String(effectiveMinGateEnergy(runtimeConfig));
+  json += ",\"effective_min_activity_score\":" + String(effectiveMinActivityScore(runtimeConfig));
+  json += ",\"active_gate_count\":" + String(metrics.activeGateCount);
+  json += ",\"activity_score\":" + String(metrics.activityScore);
+  json += ",\"dominant_gate_distance_cm\":" + String(metrics.dominantGateDistanceCm);
+  json += ",\"dominant_gate_energy\":" + String(metrics.dominantGateEnergy);
   json += "}";
   return json;
 }
@@ -1989,19 +2163,27 @@ RoomAggregateMetrics buildRoomAggregateMetrics() {
 }
 
 uint16_t effectiveMinGateEnergy() {
-  uint8_t sensitivity = constrain(runtimeConfig.sensitivityPercent, static_cast<uint8_t>(10), static_cast<uint8_t>(100));
-  uint32_t scaled = (static_cast<uint32_t>(runtimeConfig.minGateEnergy) * static_cast<uint32_t>(150 - sensitivity)) / 100U;
+  return effectiveMinGateEnergy(runtimeConfig);
+}
+
+uint16_t effectiveMinGateEnergy(const RuntimeHomeAssistantConfig& config) {
+  uint8_t sensitivity = constrain(config.sensitivityPercent, static_cast<uint8_t>(10), static_cast<uint8_t>(100));
+  uint32_t scaled = (static_cast<uint32_t>(config.minGateEnergy) * static_cast<uint32_t>(150 - sensitivity)) / 100U;
   return static_cast<uint16_t>(max<uint32_t>(10U, scaled));
 }
 
 uint8_t effectiveMinActivityScore() {
-  uint8_t sensitivity = constrain(runtimeConfig.sensitivityPercent, static_cast<uint8_t>(10), static_cast<uint8_t>(100));
-  uint32_t scaled = (static_cast<uint32_t>(runtimeConfig.minActivityScore) * static_cast<uint32_t>(150 - sensitivity)) / 100U;
+  return effectiveMinActivityScore(runtimeConfig);
+}
+
+uint8_t effectiveMinActivityScore(const RuntimeHomeAssistantConfig& config) {
+  uint8_t sensitivity = constrain(config.sensitivityPercent, static_cast<uint8_t>(10), static_cast<uint8_t>(100));
+  uint32_t scaled = (static_cast<uint32_t>(config.minActivityScore) * static_cast<uint32_t>(150 - sensitivity)) / 100U;
   return static_cast<uint8_t>(max<uint32_t>(1U, min<uint32_t>(100U, scaled)));
 }
 
-bool energyFrameLooksLikeNearFieldClutter(const RadarDerivedMetrics& metrics) {
-  if (!metrics.energyBased || !latestEnergyFrameSnapshot.valid || metrics.dominantGateIndex < 0) {
+bool energyFrameLooksLikeNearFieldClutter(const RadarDerivedMetrics& metrics, const LatestEnergyFrameSnapshot& energyFrame) {
+  if (!metrics.energyBased || !energyFrame.valid || metrics.dominantGateIndex < 0) {
     return false;
   }
 
@@ -2009,7 +2191,7 @@ bool energyFrameLooksLikeNearFieldClutter(const RadarDerivedMetrics& metrics) {
     return false;
   }
 
-  const int reportedDistanceCm = latestEnergyFrameSnapshot.distanceCm;
+  const int reportedDistanceCm = energyFrame.distanceCm;
   if (reportedDistanceCm <= 0 || metrics.dominantGateDistanceCm < 0) {
     return false;
   }
@@ -2020,7 +2202,7 @@ bool energyFrameLooksLikeNearFieldClutter(const RadarDerivedMetrics& metrics) {
 
   uint32_t nearFieldBandEnergy = 0;
   for (uint8_t gateIndex = 0; gateIndex < min<uint8_t>(LD2420_GATE_COUNT, LD2420_NEAR_FIELD_CLUTTER_BAND_GATES); gateIndex++) {
-    nearFieldBandEnergy += latestEnergyFrameSnapshot.gates[gateIndex];
+    nearFieldBandEnergy += energyFrame.gates[gateIndex];
   }
 
   const uint32_t nearFieldBandSharePercent = (nearFieldBandEnergy * 100UL) / metrics.totalGateEnergy;
@@ -2036,47 +2218,74 @@ bool energyFrameLooksLikeNearFieldClutter(const RadarDerivedMetrics& metrics) {
   int reportedGateIndex = (reportedDistanceCm + (LD2420_GATE_SIZE_CM / 2)) / LD2420_GATE_SIZE_CM;
   reportedGateIndex = constrain(reportedGateIndex, 0, LD2420_GATE_COUNT - 1);
 
-  uint32_t reportedNeighborhoodEnergy = latestEnergyFrameSnapshot.gates[reportedGateIndex];
+  uint32_t reportedNeighborhoodEnergy = energyFrame.gates[reportedGateIndex];
   if (reportedGateIndex > 0) {
-    reportedNeighborhoodEnergy += latestEnergyFrameSnapshot.gates[reportedGateIndex - 1];
+    reportedNeighborhoodEnergy += energyFrame.gates[reportedGateIndex - 1];
   }
   if (reportedGateIndex < (LD2420_GATE_COUNT - 1)) {
-    reportedNeighborhoodEnergy += latestEnergyFrameSnapshot.gates[reportedGateIndex + 1];
+    reportedNeighborhoodEnergy += energyFrame.gates[reportedGateIndex + 1];
   }
 
   return metrics.dominantGateEnergy > reportedNeighborhoodEnergy;
 }
 
 bool radarDetectionCandidate(const RadarDerivedMetrics& metrics) {
+  return radarDetectionDecision(metrics,
+                                latestEnergyFrameSnapshot.valid ? &latestEnergyFrameSnapshot : nullptr,
+                                runtimeConfig) == RadarDetectionDecision::Candidate;
+}
+
+bool radarDetectionCandidate(const RadarDerivedMetrics& metrics,
+                             const LatestEnergyFrameSnapshot* energyFrame,
+                             const RuntimeHomeAssistantConfig& config) {
+  return radarDetectionDecision(metrics, energyFrame, config) == RadarDetectionDecision::Candidate;
+}
+
+RadarDetectionDecision radarDetectionDecision(const RadarDerivedMetrics& metrics) {
+  return radarDetectionDecision(metrics,
+                                latestEnergyFrameSnapshot.valid ? &latestEnergyFrameSnapshot : nullptr,
+                                runtimeConfig);
+}
+
+RadarDetectionDecision radarDetectionDecision(const RadarDerivedMetrics& metrics,
+                                              const LatestEnergyFrameSnapshot* energyFrame,
+                                              const RuntimeHomeAssistantConfig& config) {
   if (!metrics.valid) {
-    return false;
+    return RadarDetectionDecision::InvalidMetrics;
   }
 
-  if (metrics.dominantGateDistanceCm >= 0 && metrics.dominantGateDistanceCm > runtimeConfig.maxDetectionRangeCm) {
-    return false;
+  if (metrics.dominantGateDistanceCm >= 0 && metrics.dominantGateDistanceCm > config.maxDetectionRangeCm) {
+    return RadarDetectionDecision::OutOfRange;
   }
 
-  if (metrics.activeGateCount < runtimeConfig.minActiveGates) {
-    return false;
+  if (metrics.activeGateCount < config.minActiveGates) {
+    return RadarDetectionDecision::InsufficientActiveGates;
   }
 
-  if (metrics.activityScore < effectiveMinActivityScore()) {
-    return false;
+  const uint8_t minActivity = effectiveMinActivityScore(config);
+  if (metrics.activityScore < minActivity) {
+    return RadarDetectionDecision::LowActivity;
   }
 
   if (metrics.energyBased) {
-    uint16_t minEnergy = effectiveMinGateEnergy();
-    uint32_t minTotalEnergy = static_cast<uint32_t>(minEnergy) * max<uint8_t>(runtimeConfig.minActiveGates, static_cast<uint8_t>(1));
-    if (metrics.dominantGateEnergy < minEnergy && metrics.totalGateEnergy < minTotalEnergy) {
-      return false;
+    if (energyFrame == nullptr) {
+      return RadarDetectionDecision::MissingEnergyFrame;
     }
 
-    if (energyFrameLooksLikeNearFieldClutter(metrics)) {
-      return false;
+    uint16_t minEnergy = effectiveMinGateEnergy(config);
+    uint32_t minTotalEnergy = static_cast<uint32_t>(minEnergy) * max<uint8_t>(config.minActiveGates, static_cast<uint8_t>(1));
+    if (metrics.dominantGateEnergy < minEnergy && metrics.totalGateEnergy < minTotalEnergy) {
+      return RadarDetectionDecision::LowEnergy;
+    }
+
+    if (energyFrameLooksLikeNearFieldClutter(metrics, *energyFrame)) {
+      return RadarDetectionDecision::NearFieldClutter;
     }
   }
 
-  return metrics.estimatedPeople > 0 || metrics.activityScore >= effectiveMinActivityScore();
+  return (metrics.estimatedPeople > 0 || metrics.activityScore >= minActivity)
+    ? RadarDetectionDecision::Candidate
+    : RadarDetectionDecision::LowActivity;
 }
 
 uint16_t effectivePresenceHoldMs() {
@@ -2148,10 +2357,18 @@ void publishHomeAssistantAvailability(bool online) {
 }
 
 RadarDerivedMetrics buildRadarDerivedMetrics() {
-  RadarDerivedMetrics metrics;
-  metrics.valid = latestEnergyFrameSnapshot.valid || latestTextFrameSnapshot.valid || presenceInitialized;
+  return buildRadarDerivedMetrics(latestEnergyFrameSnapshot.valid ? &latestEnergyFrameSnapshot : nullptr,
+                                  latestTextFrameSnapshot.valid ? &latestTextFrameSnapshot : nullptr,
+                                  presenceInitialized ? lastGpioPresence : false);
+}
 
-  if (latestEnergyFrameSnapshot.valid) {
+RadarDerivedMetrics buildRadarDerivedMetrics(const LatestEnergyFrameSnapshot* energyFrame,
+                                            const LatestTextFrameSnapshot* textFrame,
+                                            bool gpioPresence) {
+  RadarDerivedMetrics metrics;
+  metrics.valid = energyFrame != nullptr || textFrame != nullptr || gpioPresence;
+
+  if (energyFrame != nullptr) {
     metrics.energyBased = true;
 
     uint16_t peakEnergy = 0;
@@ -2160,7 +2377,7 @@ RadarDerivedMetrics buildRadarDerivedMetrics() {
     bool clusterOpen = false;
 
     for (uint8_t gateIndex = 0; gateIndex < LD2420_GATE_COUNT; gateIndex++) {
-      const uint16_t gateEnergy = latestEnergyFrameSnapshot.gates[gateIndex];
+      const uint16_t gateEnergy = energyFrame->gates[gateIndex];
       metrics.totalGateEnergy += gateEnergy;
 
       if (gateEnergy > peakEnergy) {
@@ -2174,7 +2391,7 @@ RadarDerivedMetrics buildRadarDerivedMetrics() {
       : LD2420_ACTIVE_GATE_FLOOR;
 
     for (uint8_t gateIndex = 0; gateIndex < LD2420_GATE_COUNT; gateIndex++) {
-      const bool gateActive = latestEnergyFrameSnapshot.gates[gateIndex] >= activeThreshold;
+      const bool gateActive = energyFrame->gates[gateIndex] >= activeThreshold;
 
       if (gateActive) {
         metrics.activeGateCount++;
@@ -2194,7 +2411,7 @@ RadarDerivedMetrics buildRadarDerivedMetrics() {
       metrics.dominantGateDistanceCm = (peakIndex * LD2420_GATE_SIZE_CM) + (LD2420_GATE_SIZE_CM / 2);
     }
 
-    if (latestEnergyFrameSnapshot.presence && peakEnergy > 0) {
+    if (energyFrame->presence && peakEnergy > 0) {
       uint8_t estimatedPeople = max<uint8_t>(1, clusterCount);
       if (metrics.activeGateCount >= 8 && metrics.totalGateEnergy >= (static_cast<uint32_t>(peakEnergy) * 3UL)) {
         estimatedPeople++;
@@ -2207,29 +2424,29 @@ RadarDerivedMetrics buildRadarDerivedMetrics() {
                              (static_cast<uint32_t>(peakEnergy) / 120UL);
     metrics.activityScore = static_cast<uint8_t>(min<uint32_t>(100UL, activityScore));
 
-    if (energyFrameLooksLikeNearFieldClutter(metrics)) {
+    if (energyFrameLooksLikeNearFieldClutter(metrics, *energyFrame)) {
       metrics.estimatedPeople = 0;
     }
 
     return metrics;
   }
 
-  if (latestTextFrameSnapshot.valid) {
-    metrics.estimatedPeople = latestTextFrameSnapshot.presence ? 1 : 0;
-    metrics.activeGateCount = latestTextFrameSnapshot.presence ? 1 : 0;
-    metrics.activityScore = latestTextFrameSnapshot.presence ? 15 : 0;
+  if (textFrame != nullptr) {
+    metrics.estimatedPeople = textFrame->presence ? 1 : 0;
+    metrics.activeGateCount = textFrame->presence ? 1 : 0;
+    metrics.activityScore = textFrame->presence ? 15 : 0;
 
-    if (latestTextFrameSnapshot.range >= 0) {
-      metrics.dominantGateDistanceCm = latestTextFrameSnapshot.range;
-      metrics.dominantGateIndex = min<int>(LD2420_GATE_COUNT - 1, latestTextFrameSnapshot.range / LD2420_GATE_SIZE_CM);
+    if (textFrame->range >= 0) {
+      metrics.dominantGateDistanceCm = textFrame->range;
+      metrics.dominantGateIndex = min<int>(LD2420_GATE_COUNT - 1, textFrame->range / LD2420_GATE_SIZE_CM);
     }
 
     return metrics;
   }
 
-  metrics.estimatedPeople = lastGpioPresence ? 1 : 0;
-  metrics.activeGateCount = lastGpioPresence ? 1 : 0;
-  metrics.activityScore = lastGpioPresence ? 5 : 0;
+  metrics.estimatedPeople = gpioPresence ? 1 : 0;
+  metrics.activeGateCount = gpioPresence ? 1 : 0;
+  metrics.activityScore = gpioPresence ? 5 : 0;
   return metrics;
 }
 
@@ -3903,10 +4120,35 @@ uint16_t readLe16(const uint8_t* data, size_t offset) {
          (static_cast<uint16_t>(data[offset + 1]) << 8);
 }
 
-bool tryEmitLd2420EnergyFrame(const uint8_t* data, size_t len) {
-  // Expected minimum:
-  // 4 header + 2 length + 1 presence + 2 distance + 16*2 energy + 4 footer = 45 bytes
-  if (len < 45) {
+size_t decodeHexBytes(const char* hex, uint8_t* output, size_t capacity) {
+  size_t length = strlen(hex);
+  size_t outputLength = min(capacity, length / 2);
+
+  auto hexNibble = [](char value) -> uint8_t {
+    if (value >= '0' && value <= '9') return static_cast<uint8_t>(value - '0');
+    if (value >= 'a' && value <= 'f') return static_cast<uint8_t>(10 + (value - 'a'));
+    if (value >= 'A' && value <= 'F') return static_cast<uint8_t>(10 + (value - 'A'));
+    return 0;
+  };
+
+  for (size_t index = 0; index < outputLength; index++) {
+    output[index] = static_cast<uint8_t>((hexNibble(hex[index * 2]) << 4) | hexNibble(hex[(index * 2) + 1]));
+  }
+
+  return outputLength;
+}
+
+void buildGenericFrameSnapshot(const uint8_t* data, size_t length, LatestGenericFrameSnapshot& snapshot) {
+  snapshot.valid = true;
+  snapshot.length = length;
+  snapshot.bytesTotal = length;
+  snapshot.framesTotal = 1;
+  snapshot.hex = buildHexString(data, length);
+  snapshot.ascii = "";
+}
+
+bool parseLd2420EnergyFrame(const uint8_t* data, size_t len, LatestEnergyFrameSnapshot& snapshot) {
+  if (len < ENERGY_FRAME_LENGTH) {
     return false;
   }
 
@@ -3914,18 +4156,300 @@ bool tryEmitLd2420EnergyFrame(const uint8_t* data, size_t len) {
     return false;
   }
 
+  snapshot.valid = true;
+  snapshot.length = len;
+  snapshot.payloadLength = readLe16(data, 4);
+  snapshot.presence = data[6] != 0;
+  snapshot.distanceCm = readLe16(data, 7);
+  snapshot.bytesTotal = len;
+  snapshot.framesTotal = 1;
+  snapshot.energyFramesTotal = 1;
+
+  for (size_t i = 0; i < LD2420_GATE_COUNT; i++) {
+    const size_t offset = 9 + (i * 2);
+    snapshot.gates[i] = readLe16(data, offset);
+  }
+
+  return true;
+}
+
+bool tryEmitEmbeddedLd2420EnergyFrames(const uint8_t* data, size_t len, size_t& consumedLength) {
+  consumedLength = 0;
+
+  if (len < ENERGY_FRAME_LENGTH) {
+    return false;
+  }
+
+  bool emittedAny = false;
+  size_t cursor = 0;
+
+  // Network-heavy loops can coalesce several fixed-length LD2420 frames into one
+  // UART buffer flush. Peel out complete embedded energy frames and keep any
+  // trailing partial bytes for the next pass.
+  while (cursor < len) {
+    size_t remaining = len - cursor;
+    if (remaining < ENERGY_FRAME_LENGTH) {
+      break;
+    }
+
+    if (startsWithEnergyHeader(data + cursor, remaining) &&
+        endsWithEnergyFooter(data + cursor, ENERGY_FRAME_LENGTH) &&
+        tryEmitLd2420EnergyFrame(data + cursor, ENERGY_FRAME_LENGTH)) {
+      emittedAny = true;
+      cursor += ENERGY_FRAME_LENGTH;
+      consumedLength = cursor;
+      continue;
+    }
+
+    cursor++;
+  }
+
+  return emittedAny;
+}
+
+uint8_t classifyBenchmarkCommand(const String& command) {
+  if (command == "ping") return 1;
+  if (command == "status") return 2;
+  if (command == "ha_status") return 3;
+  if (command == "wifi_scan") return 4;
+  if (command == "runtime_benchmark") return 5;
+  if (command == "firmware_sync") return 6;
+  if (command == "energy") return 7;
+  if (command.startsWith("ha_config:")) return 8;
+  if (command.startsWith("ha_room_config:")) return 9;
+  if (command.startsWith("ha_room_pose_publish:")) return 10;
+  if (command.startsWith("tuning_config:")) return 11;
+  if (command.startsWith("ble_tag_config:")) return 12;
+  if (command.startsWith("ble_tag_clear:")) return 13;
+  if (command.startsWith("ha_ws_config:")) return 14;
+  if (command.startsWith("ha_mqtt_endpoint:")) return 15;
+  if (command.startsWith("firmware_update:")) return 16;
+  if (command.startsWith("radar:")) return 17;
+  return 0;
+}
+
+uint32_t parseBenchmarkRoomConfigPayload(const char* payload) {
+  String fields[7];
+  splitConfigFields(String(payload), fields, 7);
+
+  uint32_t sink = 0;
+  sink ^= static_cast<uint32_t>(fields[0].length());
+  sink ^= static_cast<uint32_t>(fields[1].length() << 4);
+  sink ^= static_cast<uint32_t>(constrain(fields[2].toInt(), -2000, 2000) + 2048);
+  sink ^= static_cast<uint32_t>(constrain(fields[3].toInt(), -2000, 2000) + 4096);
+  sink ^= static_cast<uint32_t>(constrain(fields[4].toInt(), -180, 180) + 8192);
+  sink ^= static_cast<uint32_t>(constrain(fields[5].toInt(), 100, 4000));
+  sink ^= static_cast<uint32_t>(constrain(fields[6].toInt(), 100, 4000) << 1);
+  return sink;
+}
+
+uint32_t parseBenchmarkTuningConfigPayload(const char* payload) {
+  String fields[8];
+  splitConfigFields(String(payload), fields, 8);
+
+  int parsedMaxRange = fields[0].toInt();
+  int parsedMinEnergy = fields[1].toInt();
+  int parsedSensitivity = fields[2].toInt();
+  int parsedHoldMs = fields[3].toInt();
+  int parsedMinGates = fields[4].toInt();
+  int parsedMinActivity = fields[5].toInt();
+  int parsedLedBrightness = fields[7].toInt();
+
+  uint16_t maxRange = parsedMaxRange > 0 ? static_cast<uint16_t>(parsedMaxRange) : LD2420_GATE_COUNT * LD2420_GATE_SIZE_CM;
+  uint16_t minEnergy = parsedMinEnergy > 0 ? static_cast<uint16_t>(parsedMinEnergy) : LD2420_ACTIVE_GATE_FLOOR;
+  uint8_t sensitivity = static_cast<uint8_t>(constrain(parsedSensitivity > 0 ? parsedSensitivity : 55, 10, 100));
+  uint16_t holdMs = parsedHoldMs >= 0
+    ? static_cast<uint16_t>(constrain(parsedHoldMs, MIN_PRESENCE_HOLD_MS, MAX_PRESENCE_HOLD_MS))
+    : DEFAULT_PRESENCE_HOLD_MS;
+  uint8_t minGates = static_cast<uint8_t>(constrain(parsedMinGates > 0 ? parsedMinGates : 1, 1, LD2420_GATE_COUNT));
+  uint8_t minActivity = static_cast<uint8_t>(constrain(parsedMinActivity > 0 ? parsedMinActivity : 10, 1, 100));
+  bool ledEnabled = fields[6] == "1" || fields[6] == "true" || fields[6] == "on";
+  uint8_t ledBrightness = static_cast<uint8_t>(constrain(parsedLedBrightness > 0 ? parsedLedBrightness : DEFAULT_LED_BRIGHTNESS, 1, 255));
+
+  return static_cast<uint32_t>(maxRange)
+    ^ (static_cast<uint32_t>(minEnergy) << 1)
+    ^ (static_cast<uint32_t>(sensitivity) << 2)
+    ^ (static_cast<uint32_t>(holdMs) << 3)
+    ^ (static_cast<uint32_t>(minGates) << 4)
+    ^ (static_cast<uint32_t>(minActivity) << 5)
+    ^ (static_cast<uint32_t>(ledEnabled ? 1 : 0) << 6)
+    ^ (static_cast<uint32_t>(ledBrightness) << 7);
+}
+
+void runRuntimeBenchmark() {
+  uint8_t genericBytes[194] = {0};
+  const size_t genericLength = decodeHexBytes(RUNTIME_BENCHMARK_GENERIC_FRAME_HEX,
+                                              genericBytes,
+                                              sizeof(genericBytes));
+
+  LatestEnergyFrameSnapshot energySnapshot;
+  energySnapshot.valid = true;
+  energySnapshot.length = 45;
+  energySnapshot.payloadLength = 35;
+  energySnapshot.presence = false;
+  energySnapshot.distanceCm = 0;
+  energySnapshot.bytesTotal = energySnapshot.length;
+  energySnapshot.framesTotal = 1;
+  energySnapshot.energyFramesTotal = 1;
+  for (size_t gateIndex = 0; gateIndex < LD2420_GATE_COUNT; gateIndex++) {
+    energySnapshot.gates[gateIndex] = RUNTIME_BENCHMARK_ENERGY_GATES[gateIndex];
+  }
+
+  RuntimeHomeAssistantConfig benchmarkConfig;
+  benchmarkConfig.enabled = false;
+  benchmarkConfig.ledEnabled = false;
+
+  volatile uint32_t commandParseSink = 0;
+  volatile uint32_t roomConfigSink = 0;
+  volatile uint32_t tuningConfigSink = 0;
+  volatile size_t genericHexLengthSink = 0;
+  volatile uint32_t totalGateEnergySink = 0;
+  volatile bool detectionCandidateSink = false;
+
+  uint32_t commandParseStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    commandParseSink ^= classifyBenchmarkCommand(RUNTIME_BENCHMARK_SIMPLE_COMMAND);
+  }
+  uint32_t commandParseElapsedUs = micros() - commandParseStartUs;
+
+  uint32_t roomConfigStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    roomConfigSink ^= parseBenchmarkRoomConfigPayload(RUNTIME_BENCHMARK_ROOM_CONFIG_PAYLOAD);
+  }
+  uint32_t roomConfigElapsedUs = micros() - roomConfigStartUs;
+
+  uint32_t tuningConfigStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    tuningConfigSink ^= parseBenchmarkTuningConfigPayload(RUNTIME_BENCHMARK_TUNING_CONFIG_PAYLOAD);
+  }
+  uint32_t tuningConfigElapsedUs = micros() - tuningConfigStartUs;
+
+  uint32_t parseStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    LatestGenericFrameSnapshot genericSnapshot;
+    buildGenericFrameSnapshot(genericBytes, genericLength, genericSnapshot);
+    genericHexLengthSink ^= genericSnapshot.hex.length();
+  }
+  uint32_t parseElapsedUs = micros() - parseStartUs;
+
+  RadarDerivedMetrics metrics;
+  uint32_t metricsStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    metrics = buildRadarDerivedMetrics(&energySnapshot, nullptr, false);
+    totalGateEnergySink ^= metrics.totalGateEnergy;
+  }
+  uint32_t metricsElapsedUs = micros() - metricsStartUs;
+
+  metrics = buildRadarDerivedMetrics(&energySnapshot, nullptr, false);
+  uint32_t detectionStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    detectionCandidateSink ^= radarDetectionCandidate(metrics, &energySnapshot, benchmarkConfig);
+  }
+  uint32_t detectionElapsedUs = micros() - detectionStartUs;
+
+  latestRuntimeBenchmarkSnapshot.valid = true;
+  latestRuntimeBenchmarkSnapshot.measuredAtMs = millis();
+  latestRuntimeBenchmarkSnapshot.iterations = RUNTIME_BENCHMARK_ITERATIONS;
+  latestRuntimeBenchmarkSnapshot.parseCommandFixture.totalUs = commandParseElapsedUs;
+  latestRuntimeBenchmarkSnapshot.parseCommandFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(commandParseElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.parseRoomConfigFixture.totalUs = roomConfigElapsedUs;
+  latestRuntimeBenchmarkSnapshot.parseRoomConfigFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(roomConfigElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.parseTuningConfigFixture.totalUs = tuningConfigElapsedUs;
+  latestRuntimeBenchmarkSnapshot.parseTuningConfigFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(tuningConfigElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.parseGenericFixture.totalUs = parseElapsedUs;
+  latestRuntimeBenchmarkSnapshot.parseGenericFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(parseElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.totalUs = metricsElapsedUs;
+  latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(metricsElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.totalUs = detectionElapsedUs;
+  latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(detectionElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.detectionCandidate = radarDetectionCandidate(metrics, &energySnapshot, benchmarkConfig);
+  latestRuntimeBenchmarkSnapshot.peopleEstimate = metrics.estimatedPeople;
+  latestRuntimeBenchmarkSnapshot.activeGateCount = metrics.activeGateCount;
+  latestRuntimeBenchmarkSnapshot.activityScore = metrics.activityScore;
+  latestRuntimeBenchmarkSnapshot.dominantGateDistanceCm = metrics.dominantGateDistanceCm;
+
+  printJsonEventPrefix("runtime_benchmark");
+  Serial.print(",\"iterations\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.iterations);
+  Serial.print(",\"parse_command_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseCommandFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseCommandFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"parse_room_config_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseRoomConfigFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseRoomConfigFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"parse_tuning_config_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseTuningConfigFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseTuningConfigFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"parse_generic_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseGenericFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseGenericFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"derive_metrics_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"detection_candidate_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"detection_candidate\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.detectionCandidate ? "true" : "false");
+  Serial.print(",\"people_estimate\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.peopleEstimate);
+  Serial.print(",\"active_gate_count\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.activeGateCount);
+  Serial.print(",\"activity_score\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.activityScore);
+  Serial.print(",\"dominant_gate_distance_cm\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.dominantGateDistanceCm);
+  Serial.print(",\"generic_hex_length_sink\":");
+  Serial.print(static_cast<uint32_t>(genericHexLengthSink));
+  Serial.print(",\"command_parse_sink\":");
+  Serial.print(commandParseSink);
+  Serial.print(",\"room_config_sink\":");
+  Serial.print(roomConfigSink);
+  Serial.print(",\"tuning_config_sink\":");
+  Serial.print(tuningConfigSink);
+  Serial.print(",\"total_gate_energy_sink\":");
+  Serial.print(totalGateEnergySink);
+  Serial.print(",\"detection_candidate_sink\":");
+  Serial.print(detectionCandidateSink ? "true" : "false");
+  finishJsonEvent();
+  broadcastDeviceSnapshot();
+}
+
+bool tryEmitLd2420EnergyFrame(const uint8_t* data, size_t len) {
+  LatestEnergyFrameSnapshot parsed;
+  if (!parseLd2420EnergyFrame(data, len, parsed)) {
+    return false;
+  }
+
   radarFramesTotal++;
   ld2420EnergyFramesTotal++;
 
-  const uint16_t payloadLength = readLe16(data, 4);
-  const bool presence = data[6] != 0;
-  const uint16_t distanceCm = readLe16(data, 7);
-  updateDistanceCm(distanceCm);
-  latestEnergyFrameSnapshot.valid = true;
-  latestEnergyFrameSnapshot.length = len;
-  latestEnergyFrameSnapshot.payloadLength = payloadLength;
-  latestEnergyFrameSnapshot.presence = presence;
-  latestEnergyFrameSnapshot.distanceCm = distanceCm;
+  updateDistanceCm(parsed.distanceCm);
+  latestEnergyFrameSnapshot = parsed;
   latestEnergyFrameSnapshot.bytesTotal = radarBytesTotal;
   latestEnergyFrameSnapshot.framesTotal = radarFramesTotal;
   latestEnergyFrameSnapshot.energyFramesTotal = ld2420EnergyFramesTotal;
@@ -3937,7 +4461,7 @@ bool tryEmitLd2420EnergyFrame(const uint8_t* data, size_t len) {
   Serial.print(len);
 
   Serial.print(",\"payload_length\":");
-  Serial.print(payloadLength);
+  Serial.print(parsed.payloadLength);
 
   Serial.print(",\"bytes_total\":");
   Serial.print(radarBytesTotal);
@@ -3949,10 +4473,10 @@ bool tryEmitLd2420EnergyFrame(const uint8_t* data, size_t len) {
   Serial.print(ld2420EnergyFramesTotal);
 
   Serial.print(",\"presence\":");
-  Serial.print(presence ? "true" : "false");
+  Serial.print(parsed.presence ? "true" : "false");
 
   Serial.print(",\"distance_cm\":");
-  Serial.print(distanceCm);
+  Serial.print(parsed.distanceCm);
 
   Serial.print(",\"gates\":[");
 
@@ -3961,10 +4485,7 @@ bool tryEmitLd2420EnergyFrame(const uint8_t* data, size_t len) {
       Serial.print(",");
     }
 
-    const size_t offset = 9 + (i * 2);
-    uint16_t energy = readLe16(data, offset);
-    latestEnergyFrameSnapshot.gates[i] = energy;
-    Serial.print(energy);
+    Serial.print(parsed.gates[i]);
   }
 
   Serial.print("]");
@@ -4087,6 +4608,16 @@ void flushRadarBufferIfNeeded(bool force) {
   bool idleGapElapsed = (now - lastRadarByteMs) >= RADAR_IDLE_FRAME_GAP_MS;
 
   if (force || idleGapElapsed || radarBufferLength >= RADAR_FRAME_BUFFER_SIZE) {
+    size_t consumedLength = 0;
+    if (tryEmitEmbeddedLd2420EnergyFrames(radarBuffer, radarBufferLength, consumedLength)) {
+      size_t retainedLength = radarBufferLength - consumedLength;
+      if (retainedLength > 0) {
+        memmove(radarBuffer, radarBuffer + consumedLength, retainedLength);
+      }
+      radarBufferLength = retainedLength;
+      return;
+    }
+
     emitRadarFrameEvent(radarBuffer, radarBufferLength);
     radarBufferLength = 0;
   }
@@ -4173,6 +4704,7 @@ void pollPresence() {
 //   ha_mqtt_endpoint:<mqtt_host>|<mqtt_port>|<use_websockets>|<websocket_path>|<host_header>
 //   firmware_sync
 //   firmware_update:<version>
+//   runtime_benchmark
 //   energy
 //   radar:hello
 //
@@ -4195,6 +4727,11 @@ void handleUsbCommand(const String& command) {
     return;
   }
 
+  if (command == "debug_status") {
+    Serial.println(buildDebugStatusJson());
+    return;
+  }
+
   if (command == "ha_status") {
     emitHomeAssistantConfigEvent();
     return;
@@ -4202,6 +4739,11 @@ void handleUsbCommand(const String& command) {
 
   if (command == "wifi_scan") {
     emitWiFiScanResults();
+    return;
+  }
+
+  if (command == "runtime_benchmark") {
+    runRuntimeBenchmark();
     return;
   }
 
@@ -4515,6 +5057,9 @@ void handleUsbCommand(const String& command) {
 }
 
 void readUsbCommands() {
+#if !ESPWAVERIDER_USB_CONSOLE
+  return;
+#else
   while (Serial.available() > 0) {
     char c = static_cast<char>(Serial.read());
 
@@ -4540,6 +5085,7 @@ void readUsbCommands() {
       emitErrorEvent("usb command buffer overflow");
     }
   }
+#endif
 }
 
 // -----------------------------------------------------
@@ -4598,7 +5144,9 @@ void configureLd2420EnergyMode() {
 void setup() {
   bootMillis = millis();
 
+#if ESPWAVERIDER_USB_CONSOLE
   Serial.begin(USB_BAUD);
+#endif
   SettingsStore.begin("ha", false);
   loadHomeAssistantConfig();
   HomeAssistantMqttClient.setCallback(handleMqttMessage);
@@ -4608,11 +5156,13 @@ void setup() {
   ensureDeviceWebSocketActive();
   initializeBleScanner();
 
+#if ESPWAVERIDER_USB_CONSOLE
   // Give USB CDC a moment to attach, but do not block forever.
   uint32_t waitStart = millis();
   while (!Serial && (millis() - waitStart) < 2500) {
     delay(10);
   }
+#endif
 
   pinMode(RADAR_PRESENCE_PIN, RADAR_PRESENCE_PIN_MODE);
   if (kBoardProfile.hasStatusRgbLed) {
@@ -4671,4 +5221,110 @@ void loop() {
     emitHeartbeatEvent();
     publishHomeAssistantDiagnostics();
   }
+  uint8_t genericBytes[194] = {0};
+  const size_t genericLength = decodeHexBytes(RUNTIME_BENCHMARK_GENERIC_FRAME_HEX,
+                                              genericBytes,
+                                              sizeof(genericBytes));
+
+  LatestEnergyFrameSnapshot energySnapshot;
+  energySnapshot.valid = true;
+  energySnapshot.length = 45;
+  energySnapshot.payloadLength = 35;
+  energySnapshot.presence = false;
+  energySnapshot.distanceCm = 0;
+  energySnapshot.bytesTotal = energySnapshot.length;
+  energySnapshot.framesTotal = 1;
+  energySnapshot.energyFramesTotal = 1;
+  for (size_t gateIndex = 0; gateIndex < LD2420_GATE_COUNT; gateIndex++) {
+    energySnapshot.gates[gateIndex] = RUNTIME_BENCHMARK_ENERGY_GATES[gateIndex];
+  }
+
+  RuntimeHomeAssistantConfig benchmarkConfig;
+  benchmarkConfig.enabled = false;
+  benchmarkConfig.ledEnabled = false;
+
+  volatile size_t genericHexLengthSink = 0;
+  volatile uint32_t totalGateEnergySink = 0;
+  volatile bool detectionCandidateSink = false;
+
+  uint32_t parseStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    LatestGenericFrameSnapshot genericSnapshot;
+    buildGenericFrameSnapshot(genericBytes, genericLength, genericSnapshot);
+    genericHexLengthSink ^= genericSnapshot.hex.length();
+  }
+  uint32_t parseElapsedUs = micros() - parseStartUs;
+
+  RadarDerivedMetrics metrics;
+  uint32_t metricsStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    metrics = buildRadarDerivedMetrics(&energySnapshot, nullptr, false);
+    totalGateEnergySink ^= metrics.totalGateEnergy;
+  }
+  uint32_t metricsElapsedUs = micros() - metricsStartUs;
+
+  metrics = buildRadarDerivedMetrics(&energySnapshot, nullptr, false);
+  uint32_t detectionStartUs = micros();
+  for (uint32_t iteration = 0; iteration < RUNTIME_BENCHMARK_ITERATIONS; iteration++) {
+    detectionCandidateSink ^= radarDetectionCandidate(metrics, &energySnapshot, benchmarkConfig);
+  }
+  uint32_t detectionElapsedUs = micros() - detectionStartUs;
+
+  latestRuntimeBenchmarkSnapshot.valid = true;
+  latestRuntimeBenchmarkSnapshot.measuredAtMs = millis();
+  latestRuntimeBenchmarkSnapshot.iterations = RUNTIME_BENCHMARK_ITERATIONS;
+  latestRuntimeBenchmarkSnapshot.parseGenericFixture.totalUs = parseElapsedUs;
+  latestRuntimeBenchmarkSnapshot.parseGenericFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(parseElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.totalUs = metricsElapsedUs;
+  latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(metricsElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.totalUs = detectionElapsedUs;
+  latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.perIterNs =
+    static_cast<uint32_t>((static_cast<uint64_t>(detectionElapsedUs) * 1000ULL) / RUNTIME_BENCHMARK_ITERATIONS);
+  latestRuntimeBenchmarkSnapshot.detectionCandidate = radarDetectionCandidate(metrics, &energySnapshot, benchmarkConfig);
+  latestRuntimeBenchmarkSnapshot.peopleEstimate = metrics.estimatedPeople;
+  latestRuntimeBenchmarkSnapshot.activeGateCount = metrics.activeGateCount;
+  latestRuntimeBenchmarkSnapshot.activityScore = metrics.activityScore;
+  latestRuntimeBenchmarkSnapshot.dominantGateDistanceCm = metrics.dominantGateDistanceCm;
+
+  printJsonEventPrefix("runtime_benchmark");
+  Serial.print(",\"iterations\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.iterations);
+  Serial.print(",\"parse_generic_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseGenericFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.parseGenericFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"derive_metrics_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.deriveMetricsFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"detection_candidate_fixture\":{");
+  Serial.print("\"total_us\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.totalUs);
+  Serial.print(",\"per_iter_ns\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.detectionCandidateFixture.perIterNs);
+  Serial.print("}");
+  Serial.print(",\"detection_candidate\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.detectionCandidate ? "true" : "false");
+  Serial.print(",\"people_estimate\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.peopleEstimate);
+  Serial.print(",\"active_gate_count\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.activeGateCount);
+  Serial.print(",\"activity_score\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.activityScore);
+  Serial.print(",\"dominant_gate_distance_cm\":");
+  Serial.print(latestRuntimeBenchmarkSnapshot.dominantGateDistanceCm);
+  Serial.print(",\"generic_hex_length_sink\":");
+  Serial.print(static_cast<uint32_t>(genericHexLengthSink));
+  Serial.print(",\"total_gate_energy_sink\":");
+  Serial.print(totalGateEnergySink);
+  Serial.print(",\"detection_candidate_sink\":");
+  Serial.print(detectionCandidateSink ? "true" : "false");
+  finishJsonEvent();
+  broadcastDeviceSnapshot();
 }

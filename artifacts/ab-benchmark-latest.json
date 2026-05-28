@@ -1,0 +1,118 @@
+{
+  "generated_at_utc": "2026-05-24T05:57:00.8327205Z",
+  "cpp_device_url": "http://10.0.107.148",
+  "upload_port": "COM17",
+  "cpp": {
+    "measured_at_ms": 18620,
+    "iterations": 1000,
+    "parse_command_fixture": {
+      "total_us": 17831,
+      "per_iter_ns": 17831
+    },
+    "parse_room_config_fixture": {
+      "total_us": 122580,
+      "per_iter_ns": 122580
+    },
+    "parse_tuning_config_fixture": {
+      "total_us": 96911,
+      "per_iter_ns": 96911
+    },
+    "parse_generic_fixture": {
+      "total_us": 352801,
+      "per_iter_ns": 352801
+    },
+    "derive_metrics_fixture": {
+      "total_us": 2623,
+      "per_iter_ns": 2623
+    },
+    "detection_candidate_fixture": {
+      "total_us": 631,
+      "per_iter_ns": 631
+    },
+    "detection_candidate": true,
+    "people_estimate": 0,
+    "active_gate_count": 2,
+    "activity_score": 100,
+    "dominant_gate_distance_cm": 35
+  },
+  "rust": {
+    "iterations": 1000,
+    "measurements": {
+      "parse_command_fixture": {
+        "total_us": 674,
+        "per_iter_ns": 674
+      },
+      "parse_room_config_fixture": {
+        "total_us": 14296,
+        "per_iter_ns": 14296
+      },
+      "parse_tuning_config_fixture": {
+        "total_us": 14815,
+        "per_iter_ns": 14815
+      },
+      "parse_generic_fixture": {
+        "total_us": 63811,
+        "per_iter_ns": 63811
+      },
+      "derive_metrics_fixture": {
+        "total_us": 1903,
+        "per_iter_ns": 1903
+      },
+      "detection_candidate_fixture": {
+        "total_us": 649,
+        "per_iter_ns": 649
+      }
+    },
+    "raw_output": "Chip type:         esp32s3 (revision v0.2)\nCrystal frequency: 40 MHz\nFlash size:        16MB\nFeatures:          WiFi, BLE, Embedded Flash\nMAC address:       3c:dc:75:71:53:dc\nApp/part. size:    135,776/16,384,000 bytes, 0.83%\nESP-ROM:esp32s3-20210327\r\nBuild:Mar 27 2021\r\nrst:0x15 (USB_UART_CHIP_RESET),boot:0xa (SPI_FAST_FLASH_BOOT)\r\nSaved PC:0x40378eb1\r\nSPIWP:0xee\r\nmode:DIO, clock div:2\r\nload:0x3fce2820,len:0x158c\r\nload:0x403c8700,len:0xd24\r\nload:0x403cb700,len:0x2f34\r\nentry 0x403c8924\r\nI (27) boot: ESP-IDF v5.5.1-838-gd66ebb86d2e 2nd stage bootloader\r\nI (27) boot: compile time Nov 26 2025 12:27:56\r\nI (27) boot: Multicore bootloader\r\nI (29) boot: chip revision: v0.2\r\nI (31) boot: efuse block revision: v1.3\r\nI (35) boot.esp32s3: Boot SPI Speed : 40MHz\r\nI (39) boot.esp32s3: SPI Mode       : DIO\r\nI (43) boot.esp32s3: SPI Flash Size : 16MB\r\nI (47) boot: Enabling RNG early entropy source...\r\nI (51) boot: Partition Table:\r\nI (54) boot: ## Label            Usage          Type ST Offset   Length\r\nI (60) boot:  0 nvs              WiFi data        01 02 00009000 00006000\r\nI (66) boot:  1 phy_init         RF data          01 01 0000f000 00001000\r\nI (73) boot:  2 factory          factory app      00 00 00010000 00fa0000\r\nI (80) boot: End of partition table\r\nI (83) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=056ach ( 22188) map\r\nI (96) esp_image: segment 1: paddr=000156d4 vaddr=3fc89774 size=00a34h (  2612) load\r\nI (98) esp_image: segment 2: paddr=00016110 vaddr=40378000 size=01774h (  6004) load\r\nI (107) esp_image: segment 3: paddr=0001788c vaddr=00000000 size=0878ch ( 34700) \r\nI (121) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=11218h ( 70168) map\r\nI (139) boot: Loaded app from partition at offset 0x10000\r\nI (139) boot: Disabling RNG early entropy source...\r\ndevice_bench iterations=1000\r\ndevice_bench parse_command_fixture total_us=675 per_iter_ns=675\r\ndevice_bench parse_room_config_fixture total_us=14295 per_iter_ns=14295\r\ndevice_bench parse_tuning_config_fixture total_us=14814 per_iter_ns=14814\r\ndevice_bench parse_generic_fixture total_us=63811 per_iter_ns=63811\r\ndevice_bench derive_metrics_fixture total_us=1904 per_iter_ns=1904\r\ndevice_bench detection_candidate_fixture total_us=649 per_iter_ns=649\r\nEspWaveRider Rust bootstrap on ESP32-S3 DevKitM-1\r\nCommands: status, ha_status, ha_room_config:..., tuning_config:..., runtime_benchmark, firmware_sync\r\nESP-ROM:esp32s3-20210327\r\nBuild:Mar 27 2021\r\nrst:0x15 (USB_UART_CHIP_RESET),boot:0xa (SPI_FAST_FLASH_BOOT)\r\nSaved PC:0x4201266a\r\nSPIWP:0xee\r\nmode:DIO, clock div:2\r\nload:0x3fce2820,len:0x158c\r\nload:0x403c8700,len:0xd24\r\nload:0x403cb700,len:0x2f34\r\nentry 0x403c8924\r\nI (27) boot: ESP-IDF v5.5.1-838-gd66ebb86d2e 2nd stage bootloader\r\nI (27) boot: compile time Nov 26 2025 12:27:56\r\nI (27) boot: Multicore bootloader\r\nI (29) boot: chip revision: v0.2\r\nI (31) boot: efuse block revision: v1.3\r\nI (35) boot.esp32s3: Boot SPI Speed : 40MHz\r\nI (39) boot.esp32s3: SPI Mode       : DIO\r\nI (43) boot.esp32s3: SPI Flash Size : 16MB\r\nI (47) boot: Enabling RNG early entropy source...\r\nI (51) boot: Partition Table:\r\nI (54) boot: ## Label            Usage          Type ST Offset   Length\r\nI (60) boot:  0 nvs              WiFi data        01 02 00009000 00006000\r\nI (66) boot:  1 phy_init         RF data          01 01 0000f000 00001000\r\nI (73) boot:  2 factory          factory app      00 00 00010000 00fa0000\r\nI (80) boot: End of partition table\r\nI (83) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=056ach ( 22188) map\r\nI (96) esp_image: segment 1: paddr=000156d4 vaddr=3fc89774 size=00a34h (  2612) load\r\nI (98) esp_image: segment 2: paddr=00016110 vaddr=40378000 size=01774h (  6004) load\r\nI (107) esp_image: segment 3: paddr=0001788c vaddr=00000000 size=0878ch ( 34700) \r\nI (121) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=11218h ( 70168) map\r\nI (139) boot: Loaded app from partition at offset 0x10000\r\nI (139) boot: Disabling RNG early entropy source...\r\ndevice_bench iterations=1000\r\ndevice_bench parse_command_fixture total_us=674 per_iter_ns=674\r\ndevice_bench parse_room_config_fixture total_us=14296 per_iter_ns=14296\r\ndevice_bench parse_tuning_config_fixture total_us=14815 per_iter_ns=14815\r\ndevice_bench parse_generic_fixture total_us=63811 per_iter_ns=63811\r\ndevice_bench derive_metrics_fixture total_us=1903 per_iter_ns=1903\r\ndevice_bench detection_candidate_fixture total_us=649 per_iter_ns=649\r\nEspWaveRider Rust bootstrap on ESP32-S3 DevKitM-1\r\nCommands: status, ha_status, ha_room_config:..., tuning_config:..., runtime_benchmark, firmware_sync\r\n\r\n[2026-05-24T05:56:58Z INFO ] Serial port: 'COM17'\n[2026-05-24T05:56:58Z INFO ] Connecting...\n[2026-05-24T05:56:58Z INFO ] Using flash stub\n[2026-05-24T05:57:00Z INFO ] Flashing has completed!\n"
+  },
+  "comparisons": [
+    {
+      "slice": "parse_command_fixture",
+      "cpp_total_us": 17831,
+      "cpp_per_iter_ns": 17831,
+      "rust_total_us": 674,
+      "rust_per_iter_ns": 674,
+      "rust_vs_cpp_ratio": 0.038
+    },
+    {
+      "slice": "parse_room_config_fixture",
+      "cpp_total_us": 122580,
+      "cpp_per_iter_ns": 122580,
+      "rust_total_us": 14296,
+      "rust_per_iter_ns": 14296,
+      "rust_vs_cpp_ratio": 0.117
+    },
+    {
+      "slice": "parse_tuning_config_fixture",
+      "cpp_total_us": 96911,
+      "cpp_per_iter_ns": 96911,
+      "rust_total_us": 14815,
+      "rust_per_iter_ns": 14815,
+      "rust_vs_cpp_ratio": 0.153
+    },
+    {
+      "slice": "parse_generic_fixture",
+      "cpp_total_us": 352801,
+      "cpp_per_iter_ns": 352801,
+      "rust_total_us": 63811,
+      "rust_per_iter_ns": 63811,
+      "rust_vs_cpp_ratio": 0.181
+    },
+    {
+      "slice": "derive_metrics_fixture",
+      "cpp_total_us": 2623,
+      "cpp_per_iter_ns": 2623,
+      "rust_total_us": 1903,
+      "rust_per_iter_ns": 1903,
+      "rust_vs_cpp_ratio": 0.726
+    },
+    {
+      "slice": "detection_candidate_fixture",
+      "cpp_total_us": 631,
+      "cpp_per_iter_ns": 631,
+      "rust_total_us": 649,
+      "rust_per_iter_ns": 649,
+      "rust_vs_cpp_ratio": 1.029
+    }
+  ]
+}

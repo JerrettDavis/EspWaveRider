@@ -46,6 +46,54 @@ jobs:
       - name: Build ${{ matrix.environment }}
         run: pio run --environment ${{ matrix.environment }}
 
+  docs-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install DocFX
+        run: dotnet tool update --global docfx
+
+      - name: Add global .NET tools to PATH
+        run: echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Build docs site
+        run: docfx docs/docfx.json
+
+      - name: Upload docs preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site-preview
+          path: docs/_site
+
+  release-preview:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run semantic-release dry-run
+        run: npx semantic-release --dry-run --no-ci
+
   python-unit-tests:
     runs-on: ubuntu-latest
 

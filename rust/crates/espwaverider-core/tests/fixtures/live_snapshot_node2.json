@@ -9,7 +9,7 @@
   "mqtt_host_header": "",
   "mqtt_username_set": true,
   "firmware_version": "v1.0.1",
-  "build_target": "esp32-s3-devkitm-1",
+  "build_target": "lonely-esp32-s3-devkitm-1",
   "git_sha": "4b1a5fc",
   "node_id": "lb_mmwave_presence_test2",
   "friendly_name": "LB mmWav979e7 Presence Test 2",

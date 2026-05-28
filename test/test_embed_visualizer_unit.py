@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from embed_visualizer_lib import build_cpp_defines, cpp_string, render_header, resolve_firmware_version  # noqa: E402
+from embed_visualizer_lib import build_cpp_defines, cpp_string, render_header, resolve_firmware_version, resolve_release_target  # noqa: E402
 
 
 class EmbedVisualizerUnitTests(unittest.TestCase):
@@ -50,10 +50,16 @@ class EmbedVisualizerUnitTests(unittest.TestCase):
             defines,
             [
                 ("ESPWAVERIDER_FIRMWARE_VERSION", '\\"v1.2.3\\"'),
-                ("ESPWAVERIDER_BUILD_TARGET", '\\"esp32-s3-devkitm-1\\"'),
+                ("ESPWAVERIDER_BUILD_TARGET", '\\"lonely-esp32-s3-devkitm-1\\"'),
                 ("ESPWAVERIDER_GIT_SHA", '\\"abc1234\\"'),
             ],
         )
+
+    def test_resolve_release_target_maps_published_board_names(self):
+        self.assertEqual(resolve_release_target("esp32-s3-devkitm-1"), "lonely-esp32-s3-devkitm-1")
+        self.assertEqual(resolve_release_target("esp32dev-uart1"), "esp32-generic-uart1")
+        self.assertEqual(resolve_release_target("heltec-wifi-lora-32-v4"), "heltec-wifi-lora-32-v4-compatible")
+        self.assertEqual(resolve_release_target("custom-env"), "custom-env")
 
 
 if __name__ == "__main__":

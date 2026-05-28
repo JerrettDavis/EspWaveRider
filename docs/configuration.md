@@ -1,5 +1,17 @@
 # Configuration
 
+This page covers the configuration surfaces that matter in practice: board wiring, Wi-Fi and MQTT provisioning, room geometry, tuning, and BLE tag labeling.
+
+## Configuration summary
+
+| Area | Surface | Stored persistently | Typical operator path |
+| --- | --- | --- | --- |
+| Board wiring | `board_user_config.h` or `build_flags` | Build-time only | Installer or maintainer |
+| Wi-Fi and MQTT | Dashboard or `ha_config:` | Yes | Installer or operator |
+| Room placement | Dashboard or `ha_room_config:` | Yes | Installer |
+| Tuning | Dashboard or `tuning_config:` | Yes | Installer or advanced operator |
+| BLE tags | Dashboard or `ble_tag_config:` | Yes | Operator |
+
 ## Board wiring overrides
 
 Board defaults live in `include/board_profile.h`. Local overrides belong in `include/board_user_config.h`, created from `include/board_user_config.example.h`.
@@ -24,6 +36,8 @@ Example local override:
 
 You can also pass overrides through `build_flags` in `platformio.ini` when you want environment-specific wiring without a local header.
 
+Use local header overrides for one-off benches and site-specific boards. Use `build_flags` only when the override is intentional for a named environment.
+
 ## Wi-Fi and MQTT provisioning
 
 The dashboard and command surface both support runtime provisioning.
@@ -39,6 +53,18 @@ Notes:
 - MQTT can run over raw TCP or WebSockets.
 - Hostnames beginning with `ws://`, `wss://`, `http://`, or `https://` are treated as WebSocket endpoints.
 - The device stores settings in persistent preferences and reconnects automatically after changes.
+
+Example:
+
+```text
+ha_config:MyWiFi|correct-horse-battery-staple|mqtt.example.net|1883|espwave|secret|hall-node-01|Hall Node 01
+```
+
+Recommended practice:
+
+- Keep `node_id` stable over the life of the install.
+- Use a friendly name that maps to the room or mounting position.
+- Validate the resulting `mqtt_connected` and identity fields in `/api/snapshot`.
 
 ## Room placement
 
@@ -62,6 +88,12 @@ Remote room pose publish format:
 ha_room_pose_publish:<node_id>|<room_id>|<sensor_role>|<pose_x_cm>|<pose_y_cm>|<heading_deg>|<room_width_cm>|<room_height_cm>
 ```
 
+Example:
+
+```text
+ha_room_config:conference-a|fixed|230|110|180|620|410
+```
+
 ## Radar tuning
 
 Tuning command format:
@@ -71,6 +103,12 @@ tuning_config:<max_range_cm>|<min_gate_energy>|<sensitivity_pct>|<presence_hold_
 ```
 
 This controls detection range, gate energy thresholding, presence hold debounce, activity scoring, and LED behavior.
+
+Example:
+
+```text
+tuning_config:600|25|80|12000|2|45|1|32
+```
 
 ## BLE tags
 
@@ -82,3 +120,14 @@ ble_tag_clear:<slot>
 ```
 
 Use these to associate known BLE devices with labeled occupants or assets.
+
+Example:
+
+```text
+ble_tag_config:2|Jerrett Phone|AA:BB:CC:DD:EE:FF|-72
+```
+
+Current implementation note:
+
+- C++ supports live BLE observation end to end.
+- Rust persists BLE tag configuration, but live scanning remains gated off by default for stability.

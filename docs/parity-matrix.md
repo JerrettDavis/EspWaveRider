@@ -13,7 +13,7 @@ Current live snapshot on 2026-05-27:
 - Rust node `10.0.107.148`: `mqtt_connected=true`, `udp_discovery.peer_count=1`, `room_peers=1`
 - C++ node `10.0.107.149`: `mqtt_connected=true`, `udp_discovery.peer_count=1`, `room_peers=1`
 
-That means room-summary fusion and UDP discovery are both now stable in both directions over the latest live burn-in window. A separate runtime-stability issue remains: the Rust node also showed a periodic restart during follow-up polling and still needs root-cause work.
+That means room-summary fusion and UDP discovery are both now stable in both directions over the latest live burn-in window. Runtime stability is still blocked, but the failure mode is now classified: the Rust node reboots under `sys_brownout`, so the remaining work is on power-path stability rather than protocol parity.
 
 ## Command Surface
 
@@ -32,8 +32,8 @@ That means room-summary fusion and UDP discovery are both now stable in both dir
 | `ha_room_pose_publish:` | Publishes pose command/event | Publishes MQTT pose command/event | Full | Live HTTP command to Rust updated C++ snapshot pose | Rust now mirrors the C++ MQTT pose-command behavior |
 | `ble_tag_config:` | Configures BLE slots | Persists BLE tag slots and exposes them in snapshot state | Full | Live HTTP command on Rust node | Slot config, address normalization, RSSI clamp/default, and persistence now work |
 | `ble_tag_clear:` | Clears BLE slots | Clears persisted BLE tag slots and removes them from snapshot state | Full | Live HTTP command on Rust node | Clearing a slot now removes it from the persisted snapshot surface |
-| `firmware_sync` | Queues and applies OTA-safe release sync | Queues/statefully reports sync intent | Partial | Live snapshot validation | Rust exposes sync state but does not download/apply firmware |
-| `firmware_update:<version>` | Starts targeted OTA update | Records request then resolves `not_implemented` | Partial | Live state validation | Command is present, behavior is still stubbed |
+| `firmware_sync` | Queues and applies OTA-safe release sync | Queues sync intent and resolves board-specific GitHub release asset URL | Partial | Host tests + firmware compile validation | Rust now resolves release asset URLs in sync state but does not download/apply firmware |
+| `firmware_update:<version>` | Starts targeted OTA update | Records request, resolves board-specific GitHub release asset URL, then stops before download/apply | Partial | Host tests + firmware compile validation | Command is present and now resolves release-target metadata, but the OTA apply path is still stubbed |
 | `runtime_benchmark` | Runs benchmark and publishes snapshot/event | Runs benchmark and returns snapshot | Full | Live command + host benchmark support | Rust now has host benchmark coverage for MQTT parser slice too |
 | `energy` | Forces LD2420 energy mode | Forces LD2420 energy mode | Full | Code path parity | Same operational intent |
 | `radar:<payload>` | Raw UART passthrough | Raw UART passthrough | Full | Code path parity | Same operational intent |
@@ -46,8 +46,9 @@ That means room-summary fusion and UDP discovery are both now stable in both dir
 | Wi-Fi link fields | Real ESP Wi-Fi state | Real `embassy`/radio state | Full | Live HTTP on `10.0.107.148` | DHCP/IP regression fixed on 2026-05-27 |
 | MQTT state fields | `PubSubClient` state/status | Manual MQTT task state/status | Full | Live HTTP + MQTT-connected snapshots | TCP MQTT now connects reliably |
 | Firmware metadata | Version/build/git SHA | Version/build/git SHA | Full | Snapshot contract tests | Same top-level fields |
+| Boot diagnostics | Implicit reset/reboot behavior | `boot_count` and `last_reset_reason` fields | Full | Host snapshot tests + live HTTP polling | Rust now exposes persisted boot count and decoded reset reason for stability triage |
 | Runtime benchmark snapshot | Full nested benchmark object | Full nested benchmark object | Full | Snapshot contract tests + live command | Shared schema validated |
-| Firmware sync snapshot | Full status + OTA lifecycle | Full status object shape | Partial | Live snapshot + code read | Shape is present, OTA apply path is not |
+| Firmware sync snapshot | Full status + OTA lifecycle | Full status object shape plus resolved GitHub asset URL | Partial | Host snapshot tests + firmware compile validation | Shape is present and now carries resolved release URLs, but OTA apply is not implemented |
 | UDP discovery snapshot | Live peer announcements and peer list | Live peer announcements and peer list | Full | 60s live hardware burn-in | Both nodes now retain one UDP peer through the validation window |
 | Room peer snapshot | MQTT-backed room collaboration peers | MQTT-backed room collaboration peers | Full | 18-sample live burn-in on both nodes | Both nodes held `room_peers=1` across the burn-in window |
 | Latest energy frame | Full payload/gates | Full payload/gates | Full | Existing parity runtime tests | Host tests validate metrics contract |
@@ -69,8 +70,8 @@ That means room-summary fusion and UDP discovery are both now stable in both dir
 | Room summary subscribe | Active | Active | Full | 18-sample live hardware burn-in + host tests | Payload parsing is covered and both nodes held room summaries throughout the burn-in window |
 | UDP discovery announce/receive | Active | Active | Full | 60s live hardware burn-in | Removing room-summary payloads from the UDP discovery send path restored symmetric peer retention |
 | NVS persistence | Active | Active | Full | Live persistence validation | Same namespace and key set |
-| Firmware sync OTA apply | Active GitHub release download/apply | Stubbed final action | Missing | Code read + live snapshot state | Rust currently stops at `not_implemented` |
-| BLE observation pipeline | Active | Not present | Missing | Live snapshot/code read | Major remaining gap |
+| Firmware sync OTA apply | Active GitHub release download/apply | Resolves board-specific GitHub release target then stops before download/apply | Partial | Host tests + firmware compile validation | Rust now resolves the exact GitHub asset URL for the board target, but still does not fetch or apply the firmware |
+| BLE observation pipeline | Active | Scanner implementation present, runtime-gated off by default | Partial | Live flash/polling + code read | Any active BLE scanner task knocked the Rust node off the LAN on current USB/power hardware; scanner-disabled firmware stays reachable but reports `ble_beacon_count=0` |
 
 ## Validation Matrix
 
@@ -89,12 +90,15 @@ That means room-summary fusion and UDP discovery are both now stable in both dir
 
 ## Highest Priority Gaps
 
-1. Investigate the periodic Rust runtime restart observed during follow-up live polling.
+1. Resolve the Rust board power-path instability now that the restart cause is confirmed as `sys_brownout`.
 2. Implement actual OTA download/apply behavior behind `firmware_sync` / `firmware_update`.
-3. Implement BLE beacon observation and live tag presence/RSSI updates instead of configured-slot-only state.
+3. Stabilize concurrent Wi-Fi + BLE scanning on the Rust board so the implemented scanner can be left enabled without dropping the node off the LAN.
 
 ## Notes
 
 - Host-side `espwaverider-core` tests and Criterion benches must be run against the Windows host target because the workspace default target is Xtensa.
 - Live follow-up polling after the UDP fix showed the Rust node restarting around the 55-60 second mark even though MQTT, room-summary, and UDP peer surfaces recovered afterward.
+- Boot diagnostics showed those restarts as `sys_brownout`; the decisive mitigation was switching configured Rust runtime from AP+STA coexistence to station-only while keeping SoftAP fallback only for the unconfigured path. With `CpuClock::_80MHz`, `PowerSaveMode::Maximum`, and station-only runtime, the Rust node held `boot_count=584` while uptime advanced past 275s with MQTT and UDP discovery still healthy.
+- BLE scanner integration now compiles, links, and flashes, but every live variant tested so far that actively starts the scanner task causes the Rust node to stop answering on `10.0.107.148`; disabling only the scanner task restores MQTT and UDP discovery reachability immediately.
+- A lower-power passive scan profile (`interval=2000ms`, `window=100ms`, delayed start after Wi-Fi connect) still dropped the node off the LAN, so the remaining BLE gap is not just active-scan aggressiveness.
 - This matrix is intentionally behavior-first. A row is not `Full` unless the surface is both implemented and validated for its current scope.

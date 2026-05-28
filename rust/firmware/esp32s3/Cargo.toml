@@ -12,6 +12,7 @@ device-benchmarks = []
 usb-console = []
 
 [dependencies]
+bt-hci = "0.8"
 embassy-executor = "0.10"
 embassy-futures = "0.1.2"
 embassy-net = { version = "0.7", default-features = false, features = ["udp", "tcp", "dhcpv4", "medium-ethernet"] }
@@ -24,10 +25,11 @@ esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
 esp-hal = { version = "1.1.1", features = ["esp32s3", "unstable"] }
 esp-nvs = { version = "0.4.0", features = ["esp32s3"] }
 esp-println = { version = "0.17.0", default-features = false, features = ["esp32s3", "no-op"] }
-esp-radio = { version = "0.18.0", features = ["esp32s3", "wifi", "unstable", "esp-alloc", "xtensa-lx-rt"] }
+esp-radio = { version = "0.18.0", features = ["esp32s3", "wifi", "ble", "coex", "unstable", "esp-alloc", "xtensa-lx-rt"] }
 esp-rtos = { version = "0.3.0", features = ["esp32s3", "esp-radio", "esp-alloc", "embassy"] }
 esp-storage = { version = "0.9.0", features = ["esp32s3"] }
 espwaverider-core = { path = "../../crates/espwaverider-core", default-features = false, features = ["snapshot-contract"] }
 heapless = "0.8"
 smoltcp = { version = "0.12.0", default-features = false, features = ["medium-ethernet", "proto-ipv4"] }
 static_cell = "2"
+trouble-host = { version = "0.6.0", default-features = false, features = ["central", "scan", "default-packet-pool-mtu-64", "default-packet-pool-size-1"] }

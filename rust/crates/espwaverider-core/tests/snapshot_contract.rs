@@ -6,7 +6,7 @@ fn parses_live_snapshot_fixture() {
     let snapshot = DeviceSnapshot::from_json(json).unwrap();
 
     assert_eq!(snapshot.node_id, "lb_mmwave_presence_test2");
-    assert_eq!(snapshot.build_target, "esp32-s3-devkitm-1");
+    assert_eq!(snapshot.build_target, "lonely-esp32-s3-devkitm-1");
     assert_eq!(snapshot.udp_discovery.peer_count, 1);
     assert_eq!(snapshot.udp_discovery.peers[0].ip_address, "10.0.107.148");
     assert_eq!(snapshot.ble_beacon_count, 16);

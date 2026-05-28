@@ -1,5 +1,7 @@
 # Install
 
+If you want the shortest path from clone to a provisioned node, read [Getting Started](getting-started.md) after this page.
+
 ## Prerequisites
 
 You need the following tools to build and work with EspWaveRider:
@@ -32,10 +34,12 @@ platformio run --environment esp32-s3-devkitm-1
 
 ## Supported build targets
 
-- `esp32-s3-devkitm-1`
-- `esp32dev-uart1`
-- `heltec-wifi-lora-32-v3`
-- `heltec-wifi-lora-32-v4`
+| PlatformIO environment | Published release target | Notes |
+| --- | --- | --- |
+| `esp32-s3-devkitm-1` | `lonely-esp32-s3-devkitm-1` | Primary validated target |
+| `esp32dev-uart1` | `esp32-generic-uart1` | Generic ESP32 example target |
+| `heltec-wifi-lora-32-v3` | `heltec-wifi-lora-32-v3` | Supported |
+| `heltec-wifi-lora-32-v4` | `heltec-wifi-lora-32-v4-compatible` | V4-compatible profile |
 
 ## Build
 
@@ -65,3 +69,10 @@ After flashing, the device can be reached in one of these ways:
 - Over serial if you need to provision settings with raw commands.
 
 The hosted dashboard is the preferred setup path for Wi-Fi, MQTT, room placement, and tuning.
+
+Minimum acceptance checks after first boot:
+
+- `GET /api/snapshot` returns valid JSON
+- the reported firmware version and build target are correct
+- Wi-Fi and MQTT state match your expected provisioning state
+- the board-specific release target matches the binary you flashed
