@@ -1,47 +1,47 @@
 {
-    "generated_at_utc":  "2026-05-28T04:15:48Z",
+    "generated_at_utc":  "2026-05-30T05:04:36Z",
     "rust":  {
                  "elf":  {
                              "label":  "Rust ELF",
                              "path":  "C:\\git\\LB-ESP32S3-MMWave-Testing\\rust\\target\\xtensa-esp32s3-none-elf\\release\\espwaverider-esp32s3",
-                             "size_bytes":  1089024,
-                             "size_kb":  1063.5
+                             "size_bytes":  1099212,
+                             "size_kb":  1073.45
                          },
                  "sections":  {
                                   "label":  "Rust ELF",
-                                  "text":  757425,
-                                  "data":  12180,
-                                  "bss":  591720,
-                                  "dec":  1361325,
-                                  "hex":  "14c5ad"
+                                  "text":  766865,
+                                  "data":  11828,
+                                  "bss":  592068,
+                                  "dec":  1370761,
+                                  "hex":  "14ea89"
                               }
              },
     "cpp":  {
                 "bin":  {
                             "label":  "C++ BIN",
                             "path":  "C:\\git\\LB-ESP32S3-MMWave-Testing\\.pio\\build\\esp32-s3-devkitm-1\\firmware.bin",
-                            "size_bytes":  1392608,
-                            "size_kb":  1359.97
+                            "size_bytes":  1393568,
+                            "size_kb":  1360.91
                         },
                 "elf":  {
                             "label":  "C++ ELF",
                             "path":  "C:\\git\\LB-ESP32S3-MMWave-Testing\\.pio\\build\\esp32-s3-devkitm-1\\firmware.elf",
-                            "size_bytes":  3182176,
-                            "size_kb":  3107.59
+                            "size_bytes":  3183436,
+                            "size_kb":  3108.82
                         },
                 "map":  {
                             "label":  "C++ MAP",
                             "path":  "C:\\git\\LB-ESP32S3-MMWave-Testing\\.pio\\build\\esp32-s3-devkitm-1\\firmware.map",
-                            "size_bytes":  13860285,
-                            "size_kb":  13535.43
+                            "size_bytes":  13861389,
+                            "size_kb":  13536.51
                         },
                 "sections":  {
                                  "label":  "C++ ELF",
-                                 "text":  996382,
-                                 "data":  412124,
-                                 "bss":  1028881,
-                                 "dec":  2437387,
-                                 "hex":  "25310b"
+                                 "text":  997170,
+                                 "data":  412296,
+                                 "bss":  1029201,
+                                 "dec":  2438667,
+                                 "hex":  "25360b"
                              }
             }
 }

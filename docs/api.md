@@ -20,6 +20,8 @@ Invoke-RestMethod 'http://device-host-or-ip/api/snapshot' | ConvertTo-Json -Dept
 
 The snapshot includes configuration, Wi-Fi status, MQTT state, firmware metadata, live radar metrics, peer summaries, BLE observations, firmware sync state, and the latest on-device runtime benchmark result when one has been run.
 
+On the current stable Rust default build, BLE observation fields remain empty placeholders unless the firmware was built with `ble-scan`.
+
 Representative snapshot fields from a live node:
 
 ```json
@@ -104,6 +106,12 @@ Command families by operator intent:
 | Tuning and diagnostics | `tuning_config:...`, `wifi_scan`, `runtime_benchmark`, `energy`, `radar:<text>` |
 | BLE identity | `ble_tag_config:...`, `ble_tag_clear:...` |
 | Firmware lifecycle | `firmware_sync`, `firmware_update:<version>` |
+
+Firmware lifecycle notes:
+
+- C++ performs the full HTTPS OTA apply flow.
+- The stable Rust default build resolves release metadata and GitHub asset URLs, but reports `firmware_https_disabled` for HTTPS assets unless it was built with `https-ota`.
+- Treat `firmware_sync.status`, `firmware_sync.last_error`, and `firmware_sync.download_url` as the primary operator-visible contract for cross-build OTA behavior.
 
 `runtime_benchmark` runs a fixed-fixture on-device benchmark for the three parity slices used by the Rust port work:
 

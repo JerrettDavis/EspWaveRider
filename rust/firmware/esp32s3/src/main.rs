@@ -9,7 +9,11 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 use alloc::string::String;
 use alloc::vec::Vec;
+#[cfg(feature = "https-ota")]
+use alloc::ffi::CString;
 use core::cell::RefCell;
+#[cfg(feature = "https-ota")]
+use core::ffi::CStr;
 #[cfg(not(feature = "usb-console"))]
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -19,14 +23,13 @@ use embassy_net::{
     Config as NetConfig, IpAddress, IpEndpoint, Ipv4Address, Ipv4Cidr, Stack as NetStack,
     StackResources as NetStackResources, StaticConfigV4,
 };
+use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata as UdpPacketMetadata, UdpSocket};
 use embassy_executor::Spawner;
-use embassy_futures::{
-    join::join,
-    select::{select, select3, Either, Either3},
-    yield_now,
-};
+#[cfg(feature = "ble-scan")]
+use embassy_futures::join::join;
+use embassy_futures::{select::{select, select3, Either, Either3}, yield_now};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::Channel as SyncChannel,
@@ -35,6 +38,7 @@ use embassy_sync::{
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_alloc as _;
 use esp_backtrace as _;
+use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
 use esp_bootloader_esp_idf::partitions::{
     DataPartitionSubType, PartitionType, PARTITION_TABLE_MAX_LEN, read_partition_table,
 };
@@ -51,6 +55,15 @@ use esp_hal::{
     timer::timg::TimerGroup,
     uart::{Config as UartConfig, Uart},
 };
+#[cfg(feature = "https-ota")]
+use esp_hal::rng::{Trng, TrngSource};
+#[cfg(feature = "https-ota")]
+use mbedtls_rs::io::{
+    Error as TlsIoError, ErrorKind as TlsIoErrorKind, ErrorType as TlsErrorType,
+    Read as TlsRead, Write as TlsWrite,
+};
+#[cfg(feature = "https-ota")]
+use mbedtls_rs::{Certificate, ClientSessionConfig, Session, SessionConfig, Tls, TlsReference, X509};
 use esp_nvs::{Key, Nvs};
 #[cfg(feature = "usb-console")]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
@@ -71,8 +84,7 @@ use espwaverider_core::{
     ble::{
         BLE_TAG_DEFAULT_MIN_RSSI, BLE_TAG_FRESHNESS_MS,
         BleBeaconSightingState, BleIdentityTagState, ble_beacon_sighting_active,
-        ble_identity_tag_present, clear_ble_identity_tag, extract_ble_local_name,
-        extract_ble_service_uuid, normalize_ble_identity_value, record_ble_advertisement,
+        ble_identity_tag_present, clear_ble_identity_tag, normalize_ble_identity_value,
     },
     board::{PresencePinMode, ESP32_S3_DEVKITM_1},
     command::{
@@ -94,8 +106,13 @@ use espwaverider_core::{
         UdpDiscoverySnapshot, WifiLinkSnapshot,
     },
 };
+#[cfg(feature = "ble-scan")]
+use espwaverider_core::ble::{
+    extract_ble_local_name, extract_ble_service_uuid, record_ble_advertisement,
+};
 use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr};
 use static_cell::StaticCell;
+#[cfg(feature = "ble-scan")]
 use trouble_host::prelude::{
     Address as TroubleAddress, DefaultPacketPool, EventHandler as TroubleEventHandler,
     ExternalController, HostResources, PhySet, ScanConfig as BleScanConfig, Scanner,
@@ -175,9 +192,13 @@ const SETTINGS_KEY_LED_BRI: Key = Key::from_str("led_bri");
 const SETTINGS_KEY_BOOT_COUNT: Key = Key::from_str("boot_cnt");
 const MAX_BLE_SIGHTINGS: usize = 16;
 const MAX_BLE_TAGS: usize = 8;
+#[cfg(feature = "ble-scan")]
 const MAX_BLE_ADV_DATA_LEN: usize = 31;
+#[cfg(feature = "ble-scan")]
 const BLE_SCAN_INTERVAL_MS: u64 = 2000;
+#[cfg(feature = "ble-scan")]
 const BLE_SCAN_WINDOW_MS: u64 = 100;
+#[cfg(feature = "ble-scan")]
 const ENABLE_BLE_SCANNER_TASK: bool = false;
 const DEFAULT_AP_NETMASK: Ipv4Address = Ipv4Address::new(255, 255, 255, 0);
 const DEFAULT_AP_GATEWAY: Ipv4Address = Ipv4Address::new(192, 168, 4, 1);
@@ -205,6 +226,16 @@ const MQTT_KEEPALIVE_SECS: u16 = 30;
 const MQTT_SOCKET_BUFFER_SIZE: usize = 1024;
 const MQTT_PACKET_ID_SUBSCRIBE: u16 = 1;
 const MQTT_SUMMARY_PUBLISH_MS: u32 = 5_000;
+const FIRMWARE_HTTP_HEADER_BUFFER_SIZE: usize = 4096;
+const FIRMWARE_HTTP_READ_BUFFER_SIZE: usize = 2048;
+const FIRMWARE_SYNC_MAX_REDIRECTS: usize = 4;
+#[cfg(feature = "https-ota")]
+const OTA_CA_BUNDLE: &CStr = match CStr::from_bytes_with_nul(
+    concat!(include_str!("ota_ca_bundle.pem"), "\0").as_bytes(),
+) {
+    Ok(bundle) => bundle,
+    Err(_) => panic!("ota_ca_bundle.pem is not a valid PEM bundle"),
+};
 const WIFI_CONNECT_TIMEOUT_MS: u64 = 5_000;
 const BOARD_PROFILE: espwaverider_core::board::BoardProfile = ESP32_S3_DEVKITM_1;
 const PRESENCE_POLL_MS: u32 = 25;
@@ -234,6 +265,9 @@ const LD2420_DISABLE_CONFIG: &[u8] = &[
 static AP_NET_RESOURCES: StaticCell<NetStackResources<AP_NET_STACK_SOCKETS>> = StaticCell::new();
 static STATION_NET_RESOURCES: StaticCell<NetStackResources<STATION_NET_STACK_SOCKETS>> =
     StaticCell::new();
+static SETTINGS_FLASH_STORAGE: StaticCell<RefCell<FlashStorage<'static>>> = StaticCell::new();
+#[cfg(feature = "https-ota")]
+static TLS_ENTROPY_READY: AtomicBool = AtomicBool::new(false);
 static DHCP_RX_META: StaticCell<[UdpPacketMetadata; 4]> = StaticCell::new();
 static DHCP_TX_META: StaticCell<[UdpPacketMetadata; 4]> = StaticCell::new();
 static DHCP_RX_BUFFER: StaticCell<[u8; 1536]> = StaticCell::new();
@@ -265,6 +299,7 @@ static MQTT_COMMAND_CHANNEL: SyncChannel<CriticalSectionRawMutex, MqttTaskComman
     SyncChannel::new();
 static MQTT_EVENT_CHANNEL: SyncChannel<CriticalSectionRawMutex, MqttTaskEvent, 8> =
     SyncChannel::new();
+#[cfg(feature = "ble-scan")]
 static BLE_SCAN_EVENT_CHANNEL: SyncChannel<CriticalSectionRawMutex, BleScanEventMessage, 16> =
     SyncChannel::new();
 static UDP_DISCOVERY_STARTED: Mutex<CriticalSectionRawMutex, bool> = Mutex::new(false);
@@ -310,6 +345,7 @@ enum MqttTaskEvent {
     RoomSummary(heapless::String<512>),
 }
 
+#[cfg(feature = "ble-scan")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BleScanEventMessage {
     address: [u8; 6],
@@ -318,10 +354,12 @@ struct BleScanEventMessage {
     scan_data: heapless::Vec<u8, MAX_BLE_ADV_DATA_LEN>,
 }
 
+#[cfg(feature = "ble-scan")]
 struct BleScanHandler {
     last_adv: RefCell<Option<(TroubleAddress, heapless::Vec<u8, MAX_BLE_ADV_DATA_LEN>)>>,
 }
 
+#[cfg(feature = "ble-scan")]
 impl BleScanHandler {
     fn new() -> Self {
         Self {
@@ -356,6 +394,7 @@ impl BleScanHandler {
     }
 }
 
+#[cfg(feature = "ble-scan")]
 impl TroubleEventHandler for BleScanHandler {
     fn on_adv_reports(&self, reports: bt_hci::param::LeAdvReportsIter) {
         for report in reports {
@@ -376,7 +415,16 @@ impl TroubleEventHandler for BleScanHandler {
     }
 }
 
-struct SettingsStorage(FlashStorage<'static>);
+#[derive(Clone, Copy)]
+struct SettingsStorage(&'static RefCell<FlashStorage<'static>>);
+
+impl SettingsStorage {
+    fn new(flash: esp_hal::peripherals::FLASH<'static>) -> Self {
+        Self(SETTINGS_FLASH_STORAGE.init(RefCell::new(
+            FlashStorage::new(flash).multicore_auto_park(),
+        )))
+    }
+}
 
 impl esp_nvs::platform::Crc for SettingsStorage {
     fn crc32(init: u32, data: &[u8]) -> u32 {
@@ -392,11 +440,13 @@ impl ReadNorFlash for SettingsStorage {
     const READ_SIZE: usize = <FlashStorage<'static> as ReadNorFlash>::READ_SIZE;
 
     fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
-        ReadNorFlash::read(&mut self.0, offset, bytes)
+        let mut flash = self.0.borrow_mut();
+        ReadNorFlash::read(&mut *flash, offset, bytes)
     }
 
     fn capacity(&self) -> usize {
-        ReadNorFlash::capacity(&self.0)
+        let flash = self.0.borrow();
+        ReadNorFlash::capacity(&*flash)
     }
 }
 
@@ -405,11 +455,13 @@ impl NorFlash for SettingsStorage {
     const ERASE_SIZE: usize = <FlashStorage<'static> as NorFlash>::ERASE_SIZE;
 
     fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-        NorFlash::write(&mut self.0, offset, bytes)
+        let mut flash = self.0.borrow_mut();
+        NorFlash::write(&mut *flash, offset, bytes)
     }
 
     fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
-        NorFlash::erase(&mut self.0, from, to)
+        let mut flash = self.0.borrow_mut();
+        NorFlash::erase(&mut *flash, from, to)
     }
 }
 
@@ -419,17 +471,20 @@ impl ReadStorage for SettingsStorage {
     type Error = <FlashStorage<'static> as ReadStorage>::Error;
 
     fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
-        ReadStorage::read(&mut self.0, offset, bytes)
+        let mut flash = self.0.borrow_mut();
+        ReadStorage::read(&mut *flash, offset, bytes)
     }
 
     fn capacity(&self) -> usize {
-        ReadStorage::capacity(&self.0)
+        let flash = self.0.borrow();
+        ReadStorage::capacity(&*flash)
     }
 }
 
 impl Storage for SettingsStorage {
     fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-        Storage::write(&mut self.0, offset, bytes)
+        let mut flash = self.0.borrow_mut();
+        Storage::write(&mut *flash, offset, bytes)
     }
 }
 
@@ -1051,12 +1106,18 @@ impl FirmwareState {
         );
     }
 
-    fn service_firmware_sync(&mut self, uptime_ms: u32) {
+    async fn service_firmware_sync(
+        &mut self,
+        uptime_ms: u32,
+        station_stack: Option<NetStack<'static>>,
+        flash_storage: SettingsStorage,
+    ) {
         if !self.firmware_sync_state.pending || self.firmware_sync_state.in_progress {
             return;
         }
 
         self.firmware_sync_state.pending = false;
+        self.firmware_sync_state.in_progress = true;
         self.firmware_sync_state.last_success = false;
         self.firmware_sync_state.last_started_ms = uptime_ms;
         if self.firmware_sync_state.download_url.is_empty() {
@@ -1067,16 +1128,96 @@ impl FirmwareState {
         } else if let Some(download_url) = parse_download_url(&self.firmware_sync_state.download_url) {
             match download_url.scheme {
                 DownloadUrlScheme::Https => {
-                    self.firmware_sync_state.last_error = String::from("release_download_tls_unsupported");
-                    self.firmware_sync_state.status = String::from(
-                        "Rust firmware sync resolved an HTTPS release asset URL, but Rust OTA does not have TLS transport support yet.",
-                    );
+                    #[cfg(not(feature = "https-ota"))]
+                    {
+                        self.firmware_sync_state.last_error = String::from("firmware_https_disabled");
+                        self.firmware_sync_state.status =
+                            String::from("Rust firmware sync HTTPS support is disabled in this build.");
+                    }
+
+                    #[cfg(feature = "https-ota")]
+                    {
+                        ensure_ota_tls_entropy();
+                        let Ok(mut tls_trng) = Trng::try_new() else {
+                            self.firmware_sync_state.last_error = String::from("firmware_https_tls_init_failed");
+                            self.firmware_sync_state.status = String::from(
+                                "Rust firmware sync could not initialize TLS after Wi-Fi came up.",
+                            );
+                            self.firmware_sync_state.last_completed_ms = uptime_ms;
+                            self.firmware_sync_state.in_progress = false;
+                            return;
+                        };
+                        let Ok(tls) = Tls::new(&mut tls_trng) else {
+                            self.firmware_sync_state.last_error = String::from("firmware_https_tls_init_failed");
+                            self.firmware_sync_state.status = String::from(
+                                "Rust firmware sync could not initialize TLS after Wi-Fi came up.",
+                            );
+                            self.firmware_sync_state.last_completed_ms = uptime_ms;
+                            self.firmware_sync_state.in_progress = false;
+                            return;
+                        };
+                        match perform_https_firmware_update(
+                            station_stack,
+                            flash_storage,
+                            tls.reference(),
+                            &download_url,
+                        )
+                        .await
+                        {
+                            Ok(bytes_written) => {
+                                self.firmware_sync_state.last_success = true;
+                                self.firmware_sync_state.last_error.clear();
+                                self.firmware_sync_state.status = {
+                                    let mut status = String::from(
+                                        "Firmware staged into the next OTA partition from HTTPS source (",
+                                    );
+                                    append_u32_decimal_string(
+                                        &mut status,
+                                        bytes_written.min(u32::MAX as usize) as u32,
+                                    );
+                                    status.push_str(" bytes). Reboot to boot the staged image.");
+                                    status
+                                };
+                            }
+                            Err(err) => {
+                                self.firmware_sync_state.last_error = err;
+                                self.firmware_sync_state.status = String::from(
+                                    "Rust firmware sync failed while downloading or staging the firmware image.",
+                                );
+                            }
+                        }
+                    }
                 }
                 DownloadUrlScheme::Http => {
-                    self.firmware_sync_state.last_error = String::from("download_flash_write_not_implemented");
-                    self.firmware_sync_state.status = String::from(
-                        "Rust firmware sync parsed the release asset download URL, but streaming firmware into flash is not implemented yet.",
-                    );
+                    match perform_http_firmware_update(
+                        station_stack,
+                        flash_storage,
+                        &download_url,
+                    )
+                    .await
+                    {
+                        Ok(bytes_written) => {
+                            self.firmware_sync_state.last_success = true;
+                            self.firmware_sync_state.last_error.clear();
+                            self.firmware_sync_state.status = {
+                                let mut status = String::from(
+                                    "Firmware staged into the next OTA partition from HTTP source (",
+                                );
+                                append_u32_decimal_string(
+                                    &mut status,
+                                    bytes_written.min(u32::MAX as usize) as u32,
+                                );
+                                status.push_str(" bytes). Reboot to boot the staged image.");
+                                status
+                            };
+                        }
+                        Err(err) => {
+                            self.firmware_sync_state.last_error = err;
+                            self.firmware_sync_state.status = String::from(
+                                "Rust firmware sync failed while downloading or staging the firmware image.",
+                            );
+                        }
+                    }
                 }
             }
         } else {
@@ -1085,6 +1226,7 @@ impl FirmwareState {
                 "Rust firmware sync resolved a release asset URL, but it is not a valid HTTP or HTTPS download target.",
             );
         }
+        self.firmware_sync_state.in_progress = false;
         self.firmware_sync_state.last_completed_ms = uptime_ms;
     }
 
@@ -2178,6 +2320,7 @@ async fn station_http_server_task(stack: NetStack<'static>) -> ! {
     serve_http_connections(stack, rx_buffer, tx_buffer).await
 }
 
+#[cfg(feature = "ble-scan")]
 #[embassy_executor::task]
 async fn ble_scanner_task(bluetooth: esp_hal::peripherals::BT<'static>) -> ! {
     let connector = match esp_radio::ble::controller::BleConnector::new(bluetooth, Default::default()) {
@@ -2324,18 +2467,20 @@ async fn main(spawner: Spawner) {
     let mut base_mac_address = [0_u8; 6];
     base_mac_address.copy_from_slice(efuse::base_mac_address().as_bytes());
     state.initialize_device_identity(base_mac_address);
-    let mut settings = open_settings_nvs(peripherals.FLASH).ok();
+    let settings_storage = SettingsStorage::new(peripherals.FLASH);
+    let mut settings = open_settings_nvs(settings_storage).ok();
     if let Some(settings) = settings.as_mut() {
         load_persisted_config(&mut state, settings);
         state.boot_count = state.boot_count.saturating_add(1);
-        persist_boot_diagnostics(settings, &state);
     }
     state.initialize_device_identity(base_mac_address);
     let mut wifi_device: Option<esp_hal::peripherals::WIFI<'static>> = Some(peripherals.WIFI);
+    #[cfg(feature = "ble-scan")]
     let mut bluetooth_device: Option<esp_hal::peripherals::BT<'static>> = Some(peripherals.BT);
     let mut wifi_controller = None;
     let mut ap_stack = None;
     let mut station_stack = None;
+    #[cfg(feature = "ble-scan")]
     let mut ble_scanner_started = false;
     let mut command_buffer = heapless::Vec::<u8, 256>::new();
     #[cfg(feature = "usb-console")]
@@ -2372,9 +2517,11 @@ async fn main(spawner: Spawner) {
             &mut wifi_controller,
             &mut ap_stack,
             &mut station_stack,
+            &mut usb_serial,
             now,
         )
         .await;
+        #[cfg(feature = "ble-scan")]
         if ENABLE_BLE_SCANNER_TASK && !ble_scanner_started && state.wifi_connected {
             if let Some(bluetooth) = bluetooth_device.take() {
                 if let Ok(task) = ble_scanner_task(bluetooth) {
@@ -2386,7 +2533,6 @@ async fn main(spawner: Spawner) {
         process_udp_discovery(&mut state, station_stack, now);
         process_mqtt_runtime(&mut state, now);
         process_ble_scan_events(&mut state, now);
-        state.service_firmware_sync(now);
         process_pending_http_request(
             &mut state,
             &boot_started,
@@ -2396,6 +2542,9 @@ async fn main(spawner: Spawner) {
             &mut wifi_controller,
         )
         .await;
+        state
+            .service_firmware_sync(now, station_stack, settings_storage)
+            .await;
         state.poll_presence(presence_pin.is_high(), now);
         update_status_led(&mut status_led, state.status_led_rgb(now));
         #[cfg(feature = "usb-console")]
@@ -2474,6 +2623,7 @@ async fn poll_wifi_runtime(
     wifi_controller: &mut Option<WifiController<'static>>,
     ap_stack: &mut Option<NetStack<'static>>,
     station_stack: &mut Option<NetStack<'static>>,
+    _usb_serial: &mut UsbSerialJtag<'_, esp_hal::Blocking>,
     uptime_ms: u32,
 ) {
     if let Some(stack) = station_stack.as_ref().copied() {
@@ -2492,8 +2642,8 @@ async fn poll_wifi_runtime(
             return;
         };
 
-        let controller_config = RadioWifiControllerConfig::default()
-            .with_initial_config(build_radio_config(state));
+        let controller_config =
+            RadioWifiControllerConfig::default().with_initial_config(build_radio_config(state));
 
         match radio_wifi::new(device, controller_config) {
             Ok((mut controller, interfaces)) => {
@@ -2529,7 +2679,12 @@ async fn poll_wifi_runtime(
                     Ok(()) => {
                         state.wifi_runtime_started = true;
                         if state.home_assistant_configured() {
-                            attempt_wifi_connect(&mut controller, state, uptime_ms).await;
+                            state.wifi_connected = false;
+                            state.wifi_disconnect_reason = 0;
+                            state.wifi_disconnect_reason_text =
+                                String::from(DEFAULT_WIFI_CONNECTING_REASON_TEXT);
+                            state.last_wifi_attempt_ms =
+                                uptime_ms.saturating_sub(WIFI_CONNECT_RETRY_MS);
                         } else {
                             state.mark_wifi_disconnected(DEFAULT_WIFI_NOT_CONFIGURED_REASON_TEXT);
                         }
@@ -2769,6 +2924,7 @@ fn process_mqtt_runtime(state: &mut FirmwareState, uptime_ms: u32) {
     }
 }
 
+#[cfg(feature = "ble-scan")]
 fn process_ble_scan_events(state: &mut FirmwareState, uptime_ms: u32) {
     while let Ok(event) = BLE_SCAN_EVENT_CHANNEL.try_receive() {
         let address = format_ble_address(event.address);
@@ -2787,6 +2943,9 @@ fn process_ble_scan_events(state: &mut FirmwareState, uptime_ms: u32) {
         );
     }
 }
+
+#[cfg(not(feature = "ble-scan"))]
+fn process_ble_scan_events(_state: &mut FirmwareState, _uptime_ms: u32) {}
 
 fn process_udp_discovery(state: &mut FirmwareState, station_stack: Option<NetStack<'static>>, uptime_ms: u32) {
     if station_stack.is_none() {
@@ -3299,6 +3458,10 @@ fn append_i32_heapless(output: &mut heapless::String<384>, value: i32) -> Option
     }
 }
 
+fn append_u32_decimal_string(output: &mut String, value: u32) {
+    let _ = core::fmt::Write::write_fmt(output, format_args!("{}", value));
+}
+
 fn push_json_string_field(
     payload: &mut heapless::String<384>,
     key: &str,
@@ -3637,6 +3800,563 @@ async fn process_pending_http_request(
     };
 
     let _ = HTTP_RESPONSE_CHANNEL.sender().try_send(response);
+}
+
+struct OtaPartitionWriter<'a, F>
+where
+    F: NorFlash,
+{
+    partition: esp_bootloader_esp_idf::partitions::FlashRegion<'a, F>,
+    offset: u32,
+    trailing: [u8; 4],
+    trailing_len: usize,
+    total_bytes: usize,
+}
+
+impl<'a, F> OtaPartitionWriter<'a, F>
+where
+    F: NorFlash,
+{
+    fn new(
+        mut partition: esp_bootloader_esp_idf::partitions::FlashRegion<'a, F>,
+    ) -> Result<Self, String> {
+        let capacity = partition.capacity();
+        partition
+            .erase(0, capacity.min(u32::MAX as usize) as u32)
+            .map_err(|_| String::from("ota_partition_erase_failed"))?;
+
+        Ok(Self {
+            partition,
+            offset: 0,
+            trailing: [0xff; 4],
+            trailing_len: 0,
+            total_bytes: 0,
+        })
+    }
+
+    fn write_chunk(&mut self, mut chunk: &[u8]) -> Result<(), String> {
+        self.total_bytes = self.total_bytes.saturating_add(chunk.len());
+
+        if self.trailing_len > 0 {
+            let fill = (4 - self.trailing_len).min(chunk.len());
+            self.trailing[self.trailing_len..self.trailing_len + fill]
+                .copy_from_slice(&chunk[..fill]);
+            self.trailing_len += fill;
+            chunk = &chunk[fill..];
+
+            if self.trailing_len == 4 {
+                self.partition
+                    .write(self.offset, &self.trailing)
+                    .map_err(|_| String::from("ota_partition_write_failed"))?;
+                self.offset = self.offset.saturating_add(4);
+                self.trailing = [0xff; 4];
+                self.trailing_len = 0;
+            }
+        }
+
+        let aligned_len = chunk.len() - (chunk.len() % 4);
+        if aligned_len > 0 {
+            self.partition
+                .write(self.offset, &chunk[..aligned_len])
+                .map_err(|_| String::from("ota_partition_write_failed"))?;
+            self.offset = self.offset.saturating_add(aligned_len as u32);
+            chunk = &chunk[aligned_len..];
+        }
+
+        if !chunk.is_empty() {
+            self.trailing[..chunk.len()].copy_from_slice(chunk);
+            self.trailing_len = chunk.len();
+        }
+
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        if self.trailing_len == 0 {
+            return Ok(());
+        }
+
+        self.partition
+            .write(self.offset, &self.trailing)
+            .map_err(|_| String::from("ota_partition_write_failed"))?;
+        self.offset = self.offset.saturating_add(4);
+        self.trailing = [0xff; 4];
+        self.trailing_len = 0;
+        Ok(())
+    }
+}
+
+struct HttpResponseHeader {
+    status_code: u16,
+    content_length: Option<usize>,
+    location: Option<String>,
+    header_len: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg(feature = "https-ota")]
+struct TlsSocketError;
+
+#[cfg(feature = "https-ota")]
+impl core::fmt::Display for TlsSocketError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("tls_socket_error")
+    }
+}
+
+#[cfg(feature = "https-ota")]
+impl core::error::Error for TlsSocketError {}
+
+#[cfg(feature = "https-ota")]
+impl TlsIoError for TlsSocketError {
+    fn kind(&self) -> TlsIoErrorKind {
+        TlsIoErrorKind::Other
+    }
+}
+
+#[cfg(feature = "https-ota")]
+struct TlsTcpSocket<'a> {
+    socket: TcpSocket<'a>,
+}
+
+#[cfg(feature = "https-ota")]
+impl<'a> TlsTcpSocket<'a> {
+    fn new(socket: TcpSocket<'a>) -> Self {
+        Self { socket }
+    }
+}
+
+#[cfg(feature = "https-ota")]
+impl TlsErrorType for TlsTcpSocket<'_> {
+    type Error = TlsSocketError;
+}
+
+#[cfg(feature = "https-ota")]
+impl TlsRead for TlsTcpSocket<'_> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.socket.read(buf).await.map_err(|_| TlsSocketError)
+    }
+}
+
+#[cfg(feature = "https-ota")]
+impl TlsWrite for TlsTcpSocket<'_> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.socket.write(buf).await.map_err(|_| TlsSocketError)
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.socket.flush().await.map_err(|_| TlsSocketError)
+    }
+}
+
+#[cfg(feature = "https-ota")]
+fn ota_client_config<'a>(server_name: Option<&'a CStr>) -> ClientSessionConfig<'a> {
+    ClientSessionConfig {
+        ca_chain: Some(Certificate::new(X509::PEM(OTA_CA_BUNDLE)).unwrap()),
+        server_name,
+        ..ClientSessionConfig::new()
+    }
+}
+
+async fn perform_http_firmware_update(
+    station_stack: Option<NetStack<'static>>,
+    mut flash_storage: SettingsStorage,
+    download_url: &espwaverider_core::release::ParsedDownloadUrl,
+) -> Result<usize, String> {
+    let Some(stack) = station_stack else {
+        return Err(String::from("firmware_sync_no_station_stack"));
+    };
+
+    if !stack.is_config_up() {
+        return Err(String::from("firmware_sync_network_not_ready"));
+    }
+
+    let mut partition_table_bytes = [0_u8; PARTITION_TABLE_MAX_LEN];
+    let mut updater = OtaUpdater::new(&mut flash_storage, &mut partition_table_bytes)
+        .map_err(|_| String::from("ota_partition_layout_invalid"))?;
+    let (partition, _) = updater
+        .next_partition()
+        .map_err(|_| String::from("ota_next_partition_unavailable"))?;
+    let mut writer = OtaPartitionWriter::new(partition)?;
+    let bytes_written = download_http_firmware_image(stack, download_url, &mut writer).await?;
+    writer.finish()?;
+    drop(writer);
+    updater
+        .activate_next_partition()
+        .map_err(|_| String::from("ota_activate_partition_failed"))?;
+    Ok(bytes_written)
+}
+
+#[cfg(feature = "https-ota")]
+async fn perform_https_firmware_update(
+    station_stack: Option<NetStack<'static>>,
+    mut flash_storage: SettingsStorage,
+    tls: TlsReference<'_>,
+    download_url: &espwaverider_core::release::ParsedDownloadUrl,
+) -> Result<usize, String> {
+    let Some(stack) = station_stack else {
+        return Err(String::from("firmware_sync_no_station_stack"));
+    };
+
+    if !stack.is_config_up() {
+        return Err(String::from("firmware_sync_network_not_ready"));
+    }
+
+    let mut partition_table_bytes = [0_u8; PARTITION_TABLE_MAX_LEN];
+    let mut updater = OtaUpdater::new(&mut flash_storage, &mut partition_table_bytes)
+        .map_err(|_| String::from("ota_partition_layout_invalid"))?;
+    let (partition, _) = updater
+        .next_partition()
+        .map_err(|_| String::from("ota_next_partition_unavailable"))?;
+    let mut writer = OtaPartitionWriter::new(partition)?;
+    let bytes_written = download_https_firmware_image(stack, tls, download_url, &mut writer).await?;
+    writer.finish()?;
+    drop(writer);
+    updater
+        .activate_next_partition()
+        .map_err(|_| String::from("ota_activate_partition_failed"))?;
+    Ok(bytes_written)
+}
+
+async fn download_http_firmware_image<F>(
+    stack: NetStack<'static>,
+    download_url: &espwaverider_core::release::ParsedDownloadUrl,
+    writer: &mut OtaPartitionWriter<'_, F>,
+) -> Result<usize, String>
+where
+    F: NorFlash,
+{
+    let mut current_url = download_url.clone();
+
+    for _ in 0..FIRMWARE_SYNC_MAX_REDIRECTS {
+        let resolved_ip = resolve_download_host(stack, current_url.host.as_str()).await?;
+        let mut rx_buffer = [0_u8; HTTP_SOCKET_BUFFER_SIZE];
+        let mut tx_buffer = [0_u8; HTTP_SOCKET_BUFFER_SIZE];
+        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        socket
+            .connect(IpEndpoint::new(IpAddress::Ipv4(resolved_ip), current_url.port))
+            .await
+            .map_err(|_| String::from("firmware_http_connect_failed"))?;
+
+        let mut request = String::from("GET ");
+        request.push_str(current_url.path.as_str());
+        request.push_str(" HTTP/1.1\r\nHost: ");
+        request.push_str(current_url.host.as_str());
+        request.push_str("\r\nConnection: close\r\nUser-Agent: EspWaveRider-Rust/0.1.0\r\n\r\n");
+        socket_write_all(&mut socket, request.as_bytes())
+            .await
+            .map_err(|_| String::from("firmware_http_request_failed"))?;
+
+        let mut header_buffer = [0_u8; FIRMWARE_HTTP_HEADER_BUFFER_SIZE];
+        let header = read_http_response_header_socket(&mut socket, &mut header_buffer).await?;
+
+        match header.status_code {
+            200 => {
+                if let Some(content_length) = header.content_length {
+                    if content_length > writer.partition.capacity() {
+                        return Err(String::from("ota_image_exceeds_partition"));
+                    }
+                }
+
+                if header.header_len < header_buffer.len() {
+                    let body_prefix = &header_buffer[header.header_len..];
+                    if !body_prefix.is_empty() {
+                        writer.write_chunk(body_prefix)?;
+                    }
+                }
+
+                let mut read_buffer = [0_u8; FIRMWARE_HTTP_READ_BUFFER_SIZE];
+                loop {
+                    let read = socket
+                        .read(&mut read_buffer)
+                        .await
+                        .map_err(|_| String::from("firmware_http_read_failed"))?;
+                    if read == 0 {
+                        break;
+                    }
+                    writer.write_chunk(&read_buffer[..read])?;
+                }
+
+                socket.close();
+                let _ = socket.flush().await;
+                return Ok(writer.total_bytes);
+            }
+            301 | 302 | 303 | 307 | 308 => {
+                let Some(location) = header.location else {
+                    return Err(String::from("firmware_http_redirect_missing_location"));
+                };
+                let Some(next_url) = parse_download_url(location.as_str()) else {
+                    return Err(String::from("firmware_http_redirect_invalid_location"));
+                };
+                if next_url.scheme != DownloadUrlScheme::Http {
+                    return Err(String::from("firmware_http_redirect_bad_scheme"));
+                }
+                current_url = next_url;
+            }
+            404 => return Err(String::from("firmware_http_not_found")),
+            429 => return Err(String::from("firmware_http_rate_limited")),
+            _ => return Err(String::from("firmware_http_bad_status")),
+        }
+    }
+
+    Err(String::from("firmware_http_redirect_limit"))
+}
+
+#[cfg(feature = "https-ota")]
+fn ensure_ota_tls_entropy() {
+    if !TLS_ENTROPY_READY.load(Ordering::Acquire) {
+        if TLS_ENTROPY_READY
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            unsafe { TrngSource::increase_entropy_source_counter() };
+        }
+    }
+}
+
+#[cfg(feature = "https-ota")]
+async fn download_https_firmware_image<F>(
+    stack: NetStack<'static>,
+    tls: TlsReference<'_>,
+    download_url: &espwaverider_core::release::ParsedDownloadUrl,
+    writer: &mut OtaPartitionWriter<'_, F>,
+) -> Result<usize, String>
+where
+    F: NorFlash,
+{
+    let mut current_url = download_url.clone();
+
+    for _ in 0..FIRMWARE_SYNC_MAX_REDIRECTS {
+        let resolved_ip = resolve_download_host(stack, current_url.host.as_str()).await?;
+        let mut rx_buffer = [0_u8; HTTP_SOCKET_BUFFER_SIZE];
+        let mut tx_buffer = [0_u8; HTTP_SOCKET_BUFFER_SIZE];
+        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        socket
+            .connect(IpEndpoint::new(IpAddress::Ipv4(resolved_ip), current_url.port))
+            .await
+            .map_err(|_| String::from("firmware_https_connect_failed"))?;
+        let socket = TlsTcpSocket::new(socket);
+
+        let server_name = CString::new(current_url.host.as_str())
+            .map_err(|_| String::from("firmware_https_invalid_host"))?;
+        let session_config = SessionConfig::Client(ota_client_config(Some(server_name.as_c_str())));
+        let mut session = Session::new(tls, socket, &session_config)
+            .map_err(|_| String::from("firmware_https_session_failed"))?;
+
+        let mut request = String::from("GET ");
+        request.push_str(current_url.path.as_str());
+        request.push_str(" HTTP/1.1\r\nHost: ");
+        request.push_str(current_url.host.as_str());
+        request.push_str("\r\nConnection: close\r\nUser-Agent: EspWaveRider-Rust/0.1.0\r\n\r\n");
+        write_all_io(&mut session, request.as_bytes())
+            .await
+            .map_err(|_| String::from("firmware_https_request_failed"))?;
+
+        let mut header_buffer = [0_u8; FIRMWARE_HTTP_HEADER_BUFFER_SIZE];
+    let header = read_http_response_header_io(&mut session, &mut header_buffer).await?;
+
+        match header.status_code {
+            200 => {
+                if let Some(content_length) = header.content_length {
+                    if content_length > writer.partition.capacity() {
+                        return Err(String::from("ota_image_exceeds_partition"));
+                    }
+                }
+
+                if header.header_len < header_buffer.len() {
+                    let body_prefix = &header_buffer[header.header_len..];
+                    if !body_prefix.is_empty() {
+                        writer.write_chunk(body_prefix)?;
+                    }
+                }
+
+                let mut read_buffer = [0_u8; FIRMWARE_HTTP_READ_BUFFER_SIZE];
+                loop {
+                    let read = session
+                        .read(&mut read_buffer)
+                        .await
+                        .map_err(|_| String::from("firmware_https_read_failed"))?;
+                    if read == 0 {
+                        break;
+                    }
+                    writer.write_chunk(&read_buffer[..read])?;
+                }
+
+                session
+                    .close()
+                    .await
+                    .map_err(|_| String::from("firmware_https_close_failed"))?;
+                return Ok(writer.total_bytes);
+            }
+            301 | 302 | 303 | 307 | 308 => {
+                let Some(location) = header.location else {
+                    return Err(String::from("firmware_http_redirect_missing_location"));
+                };
+                let Some(next_url) = parse_download_url(location.as_str()) else {
+                    return Err(String::from("firmware_http_redirect_invalid_location"));
+                };
+                if next_url.scheme != DownloadUrlScheme::Https {
+                    return Err(String::from("firmware_http_redirect_bad_scheme"));
+                }
+                current_url = next_url;
+            }
+            404 => return Err(String::from("firmware_http_not_found")),
+            429 => return Err(String::from("firmware_http_rate_limited")),
+            _ => return Err(String::from("firmware_http_bad_status")),
+        }
+    }
+
+    Err(String::from("firmware_http_redirect_limit"))
+}
+
+async fn resolve_download_host(stack: NetStack<'static>, host: &str) -> Result<Ipv4Address, String> {
+    if let Some(ipv4) = parse_ipv4_address(host) {
+        return Ok(ipv4);
+    }
+
+    let addresses = stack
+        .dns_query(host, DnsQueryType::A)
+        .await
+        .map_err(|_| String::from("firmware_dns_lookup_failed"))?;
+    addresses
+        .iter()
+        .find_map(|address| match address {
+            IpAddress::Ipv4(ipv4) => Some(*ipv4),
+        })
+        .ok_or_else(|| String::from("firmware_dns_no_ipv4_result"))
+}
+
+async fn read_http_response_header_socket(
+    socket: &mut TcpSocket<'_>,
+    buffer: &mut [u8; FIRMWARE_HTTP_HEADER_BUFFER_SIZE],
+) -> Result<HttpResponseHeader, String> {
+    let mut filled = 0;
+    let mut header_end = None;
+
+    while filled < buffer.len() {
+        let read = socket
+            .read(&mut buffer[filled..])
+            .await
+            .map_err(|_| String::from("firmware_http_read_failed"))?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+
+        if filled >= 4 {
+            for index in 0..=filled - 4 {
+                if &buffer[index..index + 4] == b"\r\n\r\n" {
+                    header_end = Some(index + 4);
+                    break;
+                }
+            }
+        }
+
+        if header_end.is_some() {
+            break;
+        }
+    }
+
+    parse_http_response_header(buffer, header_end)
+}
+
+#[cfg(feature = "https-ota")]
+async fn read_http_response_header_io<T>(
+    socket: &mut T,
+    buffer: &mut [u8; FIRMWARE_HTTP_HEADER_BUFFER_SIZE],
+) -> Result<HttpResponseHeader, String>
+where
+    T: TlsRead,
+{
+    let mut filled = 0;
+    let mut header_end = None;
+
+    while filled < buffer.len() {
+        let read = socket
+            .read(&mut buffer[filled..])
+            .await
+            .map_err(|_| String::from("firmware_http_read_failed"))?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+
+        if filled >= 4 {
+            for index in 0..=filled - 4 {
+                if &buffer[index..index + 4] == b"\r\n\r\n" {
+                    header_end = Some(index + 4);
+                    break;
+                }
+            }
+        }
+
+        if header_end.is_some() {
+            break;
+        }
+    }
+
+    parse_http_response_header(buffer, header_end)
+}
+
+fn parse_http_response_header(
+    buffer: &[u8; FIRMWARE_HTTP_HEADER_BUFFER_SIZE],
+    header_end: Option<usize>,
+) -> Result<HttpResponseHeader, String> {
+    let Some(header_len) = header_end else {
+        return Err(String::from("firmware_http_header_too_large"));
+    };
+
+    let header_text = core::str::from_utf8(&buffer[..header_len])
+        .map_err(|_| String::from("firmware_http_header_invalid_utf8"))?;
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or_else(|| String::from("firmware_http_header_missing_status"))?;
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| String::from("firmware_http_header_invalid_status"))?;
+
+    let mut content_length = None;
+    let mut location = None;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse::<usize>().ok();
+        } else if name.eq_ignore_ascii_case("location") {
+            location = Some(String::from(value));
+        }
+    }
+
+    Ok(HttpResponseHeader {
+        status_code,
+        content_length,
+        location,
+        header_len,
+    })
+}
+
+#[cfg(feature = "https-ota")]
+async fn write_all_io<T>(socket: &mut T, mut bytes: &[u8]) -> Result<(), ()>
+where
+    T: TlsWrite,
+{
+    while !bytes.is_empty() {
+        let written = socket.write(bytes).await.map_err(|_| ())?;
+        if written == 0 {
+            return Err(());
+        }
+        bytes = &bytes[written..];
+    }
+    socket.flush().await.map_err(|_| ())
 }
 
 fn build_station_config(state: &FirmwareState) -> StationConfig {
@@ -4037,8 +4757,8 @@ fn push_json_string_string(payload: &mut String, value: &str) {
     payload.push('"');
 }
 
-fn open_settings_nvs(flash: esp_hal::peripherals::FLASH<'static>) -> Result<SettingsNvs, ()> {
-    let mut flash_storage = SettingsStorage(FlashStorage::new(flash).multicore_auto_park());
+fn open_settings_nvs(flash_storage: SettingsStorage) -> Result<SettingsNvs, ()> {
+    let mut flash_storage = flash_storage;
     let mut partition_table_bytes = [0_u8; PARTITION_TABLE_MAX_LEN];
     let partition_table = read_partition_table(&mut flash_storage, &mut partition_table_bytes)
         .map_err(|_| ())?;
@@ -4050,7 +4770,10 @@ fn open_settings_nvs(flash: esp_hal::peripherals::FLASH<'static>) -> Result<Sett
     Nvs::new(partition.offset() as usize, partition.len() as usize, flash_storage).map_err(|_| ())
 }
 
-fn load_persisted_config(state: &mut FirmwareState, settings: &mut SettingsNvs) {
+fn load_persisted_config(
+    state: &mut FirmwareState,
+    settings: &mut SettingsNvs,
+) {
     if let Ok(value) = settings.get::<bool>(&SETTINGS_NAMESPACE, &SETTINGS_KEY_ENABLED) {
         state.enabled = value;
     }
@@ -4176,6 +4899,7 @@ fn load_persisted_config(state: &mut FirmwareState, settings: &mut SettingsNvs) 
     }
 }
 
+#[allow(dead_code)]
 fn persist_boot_diagnostics(settings: &mut SettingsNvs, state: &FirmwareState) {
     let _ = settings.set(&SETTINGS_NAMESPACE, &SETTINGS_KEY_BOOT_COUNT, state.boot_count);
 }
@@ -4261,6 +4985,7 @@ fn default_ble_identity_tags() -> Vec<BleIdentityTagState> {
     tags
 }
 
+#[cfg(feature = "ble-scan")]
 fn format_ble_address(raw: [u8; 6]) -> String {
     let mut address = String::new();
     let _ = core::fmt::write(

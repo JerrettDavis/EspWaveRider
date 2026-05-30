@@ -6,13 +6,13 @@ This page consolidates the current implementation status, the latest measured C+
 
 | Area | C++ firmware | Rust ESP32-S3 port | Current position |
 | --- | --- | --- | --- |
-| Shipping baseline | Yes | Not yet | C++ remains the production baseline |
+| Shipping baseline | Yes | Default build is operational, but not full-feature-equivalent | C++ remains the full-feature production baseline |
 | Snapshot and command contract | Full | Full | Parity validated |
 | Hosted dashboard | Full | Full | Parity validated |
 | MQTT over TCP | Full | Full | Parity validated |
 | UDP discovery and room fusion | Full | Full | Parity validated |
-| OTA apply | Full | Partial | Rust still stops before apply |
-| BLE observation | Full | Partial | Rust scanner exists but is disabled for stability |
+| OTA apply | Full | Partial | Rust default build refuses HTTPS OTA explicitly unless `https-ota` is enabled |
+| BLE observation | Full | Partial | Rust scanner is feature-gated behind `ble-scan` and remains unstable on hardware |
 
 ## Latest device benchmark summary
 
@@ -35,27 +35,29 @@ Interpretation:
 
 ## Latest size snapshot
 
-Source: `artifacts/firmware-size-report.md`, generated `2026-05-28T04:15:48Z`.
+Source: `artifacts/firmware-size-report.md`, generated `2026-05-30T05:04:36Z`.
 
 | Artifact | Bytes | KB |
 | --- | ---: | ---: |
-| Rust ELF | 1089024 | 1063.5 |
-| C++ BIN | 1392608 | 1359.97 |
-| C++ ELF | 3182176 | 3107.59 |
+| Rust ELF | 1099212 | 1073.45 |
+| C++ BIN | 1393568 | 1360.91 |
+| C++ ELF | 3183436 | 3108.82 |
 
 ELF section summary:
 
 | Artifact | text | data | bss | dec |
 | --- | ---: | ---: | ---: | ---: |
-| Rust ELF | 757425 | 12180 | 591720 | 1361325 |
-| C++ ELF | 996382 | 412124 | 1028881 | 2437387 |
+| Rust ELF | 766865 | 11828 | 592068 | 1370761 |
+| C++ ELF | 997170 | 412296 | 1029201 | 2438667 |
 
 ## Runtime and stability notes
 
 - The decisive Rust stability improvement was switching the configured runtime from AP+STA coexistence to station-only.
 - The current stable Rust runtime also uses `CpuClock::_80MHz` and `PowerSaveMode::Maximum`.
 - SoftAP remains available for the unconfigured fallback path.
+- The stable Rust default build now also excludes `https-ota` and `ble-scan`, which brought the flashed app back down to the operational baseline footprint on COM17.
 - BLE scanning remains the main live-runtime gap on the Rust board.
+- OTA parity is now isolated to the opt-in `https-ota` slice, but that slice still failed to rejoin the LAN during the latest live COM17 validation.
 
 ## How to reproduce
 

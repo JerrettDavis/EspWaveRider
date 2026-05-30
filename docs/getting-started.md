@@ -111,7 +111,8 @@ That field must match the published GitHub release asset suffix for safe OTA.
 ## 9. Known limits
 
 - C++ is the current production baseline across the full shipping feature set.
-- Rust is already strong on command/snapshot parity, MQTT over TCP, UDP discovery, and room collaboration.
-- Rust OTA apply and stable BLE scanning are still open work items.
+- Rust is already strong on command/snapshot parity, MQTT over TCP, UDP discovery, and room collaboration in the default build.
+- Rust OTA apply is feature-gated behind `https-ota` and is not yet validated as a production-safe release path.
+- Rust live BLE observation is feature-gated behind `ble-scan` and is not yet stable enough to leave enabled on the current hardware.
 
 For the current validated status, see [Parity Matrix](parity-matrix.md) and [Benchmarks And Comparison](benchmarks-and-comparison.md).

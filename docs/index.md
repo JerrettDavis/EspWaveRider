@@ -57,6 +57,6 @@ The documentation site is organized around the normal device lifecycle:
 | Shipping firmware baseline | C++ |
 | Board-specific GitHub release assets | Implemented |
 | Hosted dashboard, snapshot API, room collaboration | Production-oriented and documented |
-| Rust parity work | Strong on core runtime and contracts, not fully production-equivalent yet |
+| Rust parity work | Strong on core runtime and contracts; stable default build, but not full-feature-equivalent yet |
 
-The Rust port is close enough to compare seriously, but not yet something this repo should market as a production-equivalent replacement for the C++ firmware. The current blockers are OTA apply and stable BLE scanning.
+The Rust port is close enough to compare seriously and now has a stable default build for Wi-Fi, MQTT, UDP discovery, and room collaboration. It is still not something this repo should market as a production-equivalent replacement for the C++ firmware because OTA apply and live BLE observation remain opt-in, not yet production-safe feature slices.

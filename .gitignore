@@ -36,6 +36,7 @@ build/
 dist/
 coverage/
 rust/target/
+rust/espflash-partitions.csv
 *.bin
 *.elf
 *.map

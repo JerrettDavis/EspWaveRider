@@ -32,7 +32,9 @@ Current behavior:
 
 - A node looks for the highest visible peer release that matches its board target.
 - The actual binary is downloaded from GitHub Releases, not copied from peers.
-- The update path validates release metadata and verifies the streamed binary digest before activation.
+- C++ performs the full HTTPS download and apply flow.
+- The default Rust build resolves peer release metadata and the board-specific GitHub asset URL, but stops with `firmware_https_disabled` unless it was built with `https-ota`.
+- When `https-ota` is enabled and validated, the Rust path is intended to validate release metadata and stream the image into the OTA partition rather than copying from peers.
 
 Manual commands:
 

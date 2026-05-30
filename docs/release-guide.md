@@ -75,13 +75,16 @@ Recommended bar when runtime behavior changed:
 2. Refresh the benchmark and firmware-size reports.
 3. Confirm operator docs still match the dashboard and snapshot surfaces.
 4. Note any cross-board or C++ vs Rust compatibility caveats in commit messages so they flow into release notes.
+5. If shipping Rust artifacts, state whether they were built with `https-ota`, `ble-scan`, both, or neither.
 
 ## Operator guidance for GitHub releases
 
 - Match the binary suffix to the actual board target.
 - Verify the corresponding `.sha256` file before distribution.
 - Do not treat `lonely-esp32-s3-devkitm-1` as a generic ESP32-S3 image.
-- Treat C++ as the production baseline today; the Rust port remains a parity and benchmark track with specific open gaps.
+- Treat C++ as the full-feature production baseline today.
+- Treat the Rust default build as the stable Wi-Fi/MQTT/UDP/hosted-UI baseline, not as a full-feature replacement for C++.
+- Do not imply Rust OTA apply or live BLE observation parity unless the shipped Rust artifact was explicitly built and validated with `https-ota` and/or `ble-scan`.
 
 ## Related docs
 

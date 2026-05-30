@@ -25,3 +25,6 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
+[patch.crates-io]
+esp-radio = { path = "vendor/esp-radio" }
+
