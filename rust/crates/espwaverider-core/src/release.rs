@@ -1,4 +1,13 @@
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
+
+fn legacy_release_target_alias(build_target: &str) -> Option<&'static str> {
+    match build_target.trim() {
+        "lonely-esp32-s3-devkitm-1" => Some("esp32-s3-devkitm-1"),
+        "esp32-generic-uart1" => Some("esp32dev-uart1"),
+        "heltec-wifi-lora-32-v4-compatible" => Some("heltec-wifi-lora-32-v4"),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadUrlScheme {
@@ -92,6 +101,30 @@ pub fn firmware_release_asset_url(
     url
 }
 
+pub fn firmware_release_asset_urls(
+    owner: &str,
+    repo: &str,
+    version: &str,
+    build_target: &str,
+) -> Vec<String> {
+    let canonical_url = firmware_release_asset_url(owner, repo, version, build_target);
+    if canonical_url.is_empty() {
+        return Vec::new();
+    }
+
+    let mut urls = Vec::with_capacity(2);
+    urls.push(canonical_url);
+
+    if let Some(alias_target) = legacy_release_target_alias(build_target) {
+        let alias_url = firmware_release_asset_url(owner, repo, version, alias_target);
+        if !alias_url.is_empty() && !urls.iter().any(|existing| existing == &alias_url) {
+            urls.push(alias_url);
+        }
+    }
+
+    urls
+}
+
 pub fn parse_download_url(url: &str) -> Option<ParsedDownloadUrl> {
     let trimmed = url.trim();
     let (scheme_text, remainder) = trimmed.split_once("://")?;
@@ -136,6 +169,8 @@ pub fn parse_download_url(url: &str) -> Option<ParsedDownloadUrl> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]
@@ -163,6 +198,26 @@ mod tests {
                 "lonely-esp32-s3-devkitm-1"
             ),
             "https://github.com/JerrettDavis/EspWaveRider/releases/download/v1.2.3/EspWaveRider-1.2.3-lonely-esp32-s3-devkitm-1.bin"
+        );
+    }
+
+    #[test]
+    fn builds_release_asset_url_candidates_with_legacy_alias() {
+        assert_eq!(
+            firmware_release_asset_urls(
+                "JerrettDavis",
+                "EspWaveRider",
+                "v1.2.3-4-gabcd",
+                "lonely-esp32-s3-devkitm-1"
+            ),
+            vec![
+                String::from(
+                    "https://github.com/JerrettDavis/EspWaveRider/releases/download/v1.2.3/EspWaveRider-1.2.3-lonely-esp32-s3-devkitm-1.bin"
+                ),
+                String::from(
+                    "https://github.com/JerrettDavis/EspWaveRider/releases/download/v1.2.3/EspWaveRider-1.2.3-esp32-s3-devkitm-1.bin"
+                ),
+            ]
         );
     }
 

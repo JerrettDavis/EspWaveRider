@@ -7,7 +7,8 @@ mod bench;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 #[cfg(feature = "https-ota")]
 use alloc::ffi::CString;
@@ -63,7 +64,7 @@ use mbedtls_rs::io::{
     Read as TlsRead, Write as TlsWrite,
 };
 #[cfg(feature = "https-ota")]
-use mbedtls_rs::{Certificate, ClientSessionConfig, Session, SessionConfig, Tls, TlsReference, X509};
+use mbedtls_rs::{Certificate, ClientSessionConfig, Session, SessionConfig, SessionError, Tls, TlsReference, TlsVersion, X509};
 use esp_nvs::{Key, Nvs};
 #[cfg(feature = "usb-console")]
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
@@ -98,7 +99,9 @@ use espwaverider_core::{
     },
     mqtt::{looks_like_room_summary_payload, mqtt_room_summary_payload_from_publish},
     radar::{parse_radar_frame, EnergyFrame, GenericFrame, RadarFrame, TextFrame},
-    release::{parse_download_url, firmware_release_asset_url, DownloadUrlScheme},
+    release::{
+        firmware_release_asset_url, firmware_release_asset_urls, parse_download_url, DownloadUrlScheme,
+    },
     snapshot::{
         BleBeaconSnapshot, BleTagSnapshot, DeviceSnapshot, FirmwareSyncSnapshot,
         LatestEnergyFrameSnapshot, LatestGenericFrameSnapshot, LatestTextFrameSnapshot,
@@ -226,7 +229,7 @@ const MQTT_KEEPALIVE_SECS: u16 = 30;
 const MQTT_SOCKET_BUFFER_SIZE: usize = 1024;
 const MQTT_PACKET_ID_SUBSCRIBE: u16 = 1;
 const MQTT_SUMMARY_PUBLISH_MS: u32 = 5_000;
-const FIRMWARE_HTTP_HEADER_BUFFER_SIZE: usize = 4096;
+const FIRMWARE_HTTP_HEADER_BUFFER_SIZE: usize = 8192;
 const FIRMWARE_HTTP_READ_BUFFER_SIZE: usize = 2048;
 const FIRMWARE_SYNC_MAX_REDIRECTS: usize = 4;
 #[cfg(feature = "https-ota")]
@@ -1125,106 +1128,131 @@ impl FirmwareState {
             self.firmware_sync_state.status = String::from(
                 "Rust firmware sync could not resolve a GitHub release asset URL for this board target.",
             );
-        } else if let Some(download_url) = parse_download_url(&self.firmware_sync_state.download_url) {
-            match download_url.scheme {
-                DownloadUrlScheme::Https => {
-                    #[cfg(not(feature = "https-ota"))]
-                    {
-                        self.firmware_sync_state.last_error = String::from("firmware_https_disabled");
-                        self.firmware_sync_state.status =
-                            String::from("Rust firmware sync HTTPS support is disabled in this build.");
-                    }
+        } else {
+            let download_urls = firmware_release_download_url_candidates(
+                &self.firmware_sync_state.target_version,
+                &self.firmware_sync_state.download_url,
+            );
+            let mut last_error: Option<String> = None;
+            let mut staged_bytes_written: Option<(usize, DownloadUrlScheme)> = None;
 
-                    #[cfg(feature = "https-ota")]
-                    {
-                        ensure_ota_tls_entropy();
-                        let Ok(mut tls_trng) = Trng::try_new() else {
-                            self.firmware_sync_state.last_error = String::from("firmware_https_tls_init_failed");
-                            self.firmware_sync_state.status = String::from(
-                                "Rust firmware sync could not initialize TLS after Wi-Fi came up.",
-                            );
-                            self.firmware_sync_state.last_completed_ms = uptime_ms;
-                            self.firmware_sync_state.in_progress = false;
-                            return;
-                        };
-                        let Ok(tls) = Tls::new(&mut tls_trng) else {
-                            self.firmware_sync_state.last_error = String::from("firmware_https_tls_init_failed");
-                            self.firmware_sync_state.status = String::from(
-                                "Rust firmware sync could not initialize TLS after Wi-Fi came up.",
-                            );
-                            self.firmware_sync_state.last_completed_ms = uptime_ms;
-                            self.firmware_sync_state.in_progress = false;
-                            return;
-                        };
-                        match perform_https_firmware_update(
+            for candidate_url in download_urls {
+                let Some(download_url) = parse_download_url(candidate_url.as_str()) else {
+                    last_error = Some(String::from("release_download_url_invalid"));
+                    break;
+                };
+
+                match download_url.scheme {
+                    DownloadUrlScheme::Https => {
+                        #[cfg(not(feature = "https-ota"))]
+                        {
+                            last_error = Some(String::from("firmware_https_disabled"));
+                            break;
+                        }
+
+                        #[cfg(feature = "https-ota")]
+                        {
+                            ensure_ota_tls_entropy();
+                            let Ok(mut tls_trng) = Trng::try_new() else {
+                                self.firmware_sync_state.last_error = String::from("firmware_https_tls_init_failed");
+                                self.firmware_sync_state.status = String::from(
+                                    "Rust firmware sync could not initialize TLS after Wi-Fi came up.",
+                                );
+                                self.firmware_sync_state.last_completed_ms = uptime_ms;
+                                self.firmware_sync_state.in_progress = false;
+                                return;
+                            };
+                            let Ok(tls) = Tls::new(&mut tls_trng) else {
+                                self.firmware_sync_state.last_error = String::from("firmware_https_tls_init_failed");
+                                self.firmware_sync_state.status = String::from(
+                                    "Rust firmware sync could not initialize TLS after Wi-Fi came up.",
+                                );
+                                self.firmware_sync_state.last_completed_ms = uptime_ms;
+                                self.firmware_sync_state.in_progress = false;
+                                return;
+                            };
+                            match perform_https_firmware_update(
+                                station_stack,
+                                flash_storage,
+                                tls.reference(),
+                                &download_url,
+                            )
+                            .await
+                            {
+                                Ok(bytes_written) => {
+                                    staged_bytes_written = Some((bytes_written, DownloadUrlScheme::Https));
+                                    break;
+                                }
+                                Err(err) if err == "firmware_http_not_found" => {
+                                    last_error = Some(err);
+                                }
+                                Err(err) => {
+                                    last_error = Some(err);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    DownloadUrlScheme::Http => {
+                        match perform_http_firmware_update(
                             station_stack,
                             flash_storage,
-                            tls.reference(),
                             &download_url,
                         )
                         .await
                         {
                             Ok(bytes_written) => {
-                                self.firmware_sync_state.last_success = true;
-                                self.firmware_sync_state.last_error.clear();
-                                self.firmware_sync_state.status = {
-                                    let mut status = String::from(
-                                        "Firmware staged into the next OTA partition from HTTPS source (",
-                                    );
-                                    append_u32_decimal_string(
-                                        &mut status,
-                                        bytes_written.min(u32::MAX as usize) as u32,
-                                    );
-                                    status.push_str(" bytes). Reboot to boot the staged image.");
-                                    status
-                                };
+                                staged_bytes_written = Some((bytes_written, DownloadUrlScheme::Http));
+                                break;
+                            }
+                            Err(err) if err == "firmware_http_not_found" => {
+                                last_error = Some(err);
                             }
                             Err(err) => {
-                                self.firmware_sync_state.last_error = err;
-                                self.firmware_sync_state.status = String::from(
-                                    "Rust firmware sync failed while downloading or staging the firmware image.",
-                                );
+                                last_error = Some(err);
+                                break;
                             }
-                        }
-                    }
-                }
-                DownloadUrlScheme::Http => {
-                    match perform_http_firmware_update(
-                        station_stack,
-                        flash_storage,
-                        &download_url,
-                    )
-                    .await
-                    {
-                        Ok(bytes_written) => {
-                            self.firmware_sync_state.last_success = true;
-                            self.firmware_sync_state.last_error.clear();
-                            self.firmware_sync_state.status = {
-                                let mut status = String::from(
-                                    "Firmware staged into the next OTA partition from HTTP source (",
-                                );
-                                append_u32_decimal_string(
-                                    &mut status,
-                                    bytes_written.min(u32::MAX as usize) as u32,
-                                );
-                                status.push_str(" bytes). Reboot to boot the staged image.");
-                                status
-                            };
-                        }
-                        Err(err) => {
-                            self.firmware_sync_state.last_error = err;
-                            self.firmware_sync_state.status = String::from(
-                                "Rust firmware sync failed while downloading or staging the firmware image.",
-                            );
                         }
                     }
                 }
             }
-        } else {
-            self.firmware_sync_state.last_error = String::from("release_download_url_invalid");
-            self.firmware_sync_state.status = String::from(
-                "Rust firmware sync resolved a release asset URL, but it is not a valid HTTP or HTTPS download target.",
-            );
+
+            if let Some((bytes_written, scheme)) = staged_bytes_written {
+                self.firmware_sync_state.last_success = true;
+                self.firmware_sync_state.last_error.clear();
+                self.firmware_sync_state.status = {
+                    let mut status = match scheme {
+                        DownloadUrlScheme::Https => {
+                            String::from("Firmware staged into the next OTA partition from HTTPS source (")
+                        }
+                        DownloadUrlScheme::Http => {
+                            String::from("Firmware staged into the next OTA partition from HTTP source (")
+                        }
+                    };
+                    append_u32_decimal_string(
+                        &mut status,
+                        bytes_written.min(u32::MAX as usize) as u32,
+                    );
+                    status.push_str(" bytes). Reboot to boot the staged image.");
+                    status
+                };
+            } else if let Some(err) = last_error {
+                if err == "firmware_https_disabled" {
+                    self.firmware_sync_state.last_error = err;
+                    self.firmware_sync_state.status =
+                        String::from("Rust firmware sync HTTPS support is disabled in this build.");
+                } else if err == "release_download_url_invalid" {
+                    self.firmware_sync_state.last_error = err;
+                    self.firmware_sync_state.status = String::from(
+                        "Rust firmware sync resolved a release asset URL, but it is not a valid HTTP or HTTPS download target.",
+                    );
+                } else {
+                    self.firmware_sync_state.last_error = err;
+                    self.firmware_sync_state.status = String::from(
+                        "Rust firmware sync failed while downloading or staging the firmware image.",
+                    );
+                }
+            }
         }
         self.firmware_sync_state.in_progress = false;
         self.firmware_sync_state.last_completed_ms = uptime_ms;
@@ -2026,6 +2054,21 @@ impl FirmwareState {
     }
 }
 
+fn firmware_release_download_url_candidates(target_version: &str, primary_url: &str) -> Vec<String> {
+    let mut urls = firmware_release_asset_urls(
+        FIRMWARE_RELEASE_REPO_OWNER,
+        FIRMWARE_RELEASE_REPO_NAME,
+        target_version,
+        RUST_BUILD_TARGET,
+    );
+
+    if !primary_url.is_empty() && !urls.iter().any(|existing| existing == primary_url) {
+        urls.insert(0, String::from(primary_url));
+    }
+
+    urls
+}
+
 #[embassy_executor::task]
 async fn ap_net_task(mut runner: embassy_net::Runner<'static, WifiInterface<'static>>) -> ! {
     runner.run().await
@@ -2533,7 +2576,7 @@ async fn main(spawner: Spawner) {
         process_udp_discovery(&mut state, station_stack, now);
         process_mqtt_runtime(&mut state, now);
         process_ble_scan_events(&mut state, now);
-        process_pending_http_request(
+        let handled_http_request = process_pending_http_request(
             &mut state,
             &boot_started,
             &mut usb_serial,
@@ -2542,9 +2585,11 @@ async fn main(spawner: Spawner) {
             &mut wifi_controller,
         )
         .await;
-        state
-            .service_firmware_sync(now, station_stack, settings_storage)
-            .await;
+        if !handled_http_request {
+            state
+                .service_firmware_sync(now, station_stack, settings_storage)
+                .await;
+        }
         state.poll_presence(presence_pin.is_high(), now);
         update_status_led(&mut status_led, state.status_led_rgb(now));
         #[cfg(feature = "usb-console")]
@@ -3778,9 +3823,9 @@ async fn process_pending_http_request(
     radar_uart: &mut Uart<'_, Blocking>,
     settings: Option<&mut SettingsNvs>,
     wifi_controller: &mut Option<WifiController<'static>>,
-) {
+) -> bool {
     let Ok(request) = HTTP_REQUEST_CHANNEL.receiver().try_receive() else {
-        return;
+        return false;
     };
 
     let response = match request {
@@ -3800,6 +3845,7 @@ async fn process_pending_http_request(
     };
 
     let _ = HTTP_RESPONSE_CHANNEL.sender().try_send(response);
+    true
 }
 
 struct OtaPartitionWriter<'a, F>
@@ -3819,10 +3865,16 @@ where
 {
     fn new(
         mut partition: esp_bootloader_esp_idf::partitions::FlashRegion<'a, F>,
+        image_len: Option<usize>,
     ) -> Result<Self, String> {
         let capacity = partition.capacity();
+        let erase_len = image_len
+            .map(|len| len.min(capacity))
+            .map(|len| len.next_multiple_of(F::ERASE_SIZE))
+            .unwrap_or(capacity)
+            .min(capacity);
         partition
-            .erase(0, capacity.min(u32::MAX as usize) as u32)
+            .erase(0, erase_len.min(u32::MAX as usize) as u32)
             .map_err(|_| String::from("ota_partition_erase_failed"))?;
 
         Ok(Self {
@@ -3891,6 +3943,7 @@ struct HttpResponseHeader {
     content_length: Option<usize>,
     location: Option<String>,
     header_len: usize,
+    bytes_filled: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3954,6 +4007,8 @@ fn ota_client_config<'a>(server_name: Option<&'a CStr>) -> ClientSessionConfig<'
     ClientSessionConfig {
         ca_chain: Some(Certificate::new(X509::PEM(OTA_CA_BUNDLE)).unwrap()),
         server_name,
+        min_version: TlsVersion::Tls1_2,
+        max_version: Some(TlsVersion::Tls1_2),
         ..ClientSessionConfig::new()
     }
 }
@@ -3971,16 +4026,13 @@ async fn perform_http_firmware_update(
         return Err(String::from("firmware_sync_network_not_ready"));
     }
 
-    let mut partition_table_bytes = [0_u8; PARTITION_TABLE_MAX_LEN];
+    let mut partition_table_bytes = Box::new([0_u8; PARTITION_TABLE_MAX_LEN]);
     let mut updater = OtaUpdater::new(&mut flash_storage, &mut partition_table_bytes)
         .map_err(|_| String::from("ota_partition_layout_invalid"))?;
     let (partition, _) = updater
         .next_partition()
         .map_err(|_| String::from("ota_next_partition_unavailable"))?;
-    let mut writer = OtaPartitionWriter::new(partition)?;
-    let bytes_written = download_http_firmware_image(stack, download_url, &mut writer).await?;
-    writer.finish()?;
-    drop(writer);
+    let bytes_written = download_http_firmware_image(stack, download_url, partition).await?;
     updater
         .activate_next_partition()
         .map_err(|_| String::from("ota_activate_partition_failed"))?;
@@ -4002,16 +4054,13 @@ async fn perform_https_firmware_update(
         return Err(String::from("firmware_sync_network_not_ready"));
     }
 
-    let mut partition_table_bytes = [0_u8; PARTITION_TABLE_MAX_LEN];
+    let mut partition_table_bytes = Box::new([0_u8; PARTITION_TABLE_MAX_LEN]);
     let mut updater = OtaUpdater::new(&mut flash_storage, &mut partition_table_bytes)
         .map_err(|_| String::from("ota_partition_layout_invalid"))?;
     let (partition, _) = updater
         .next_partition()
         .map_err(|_| String::from("ota_next_partition_unavailable"))?;
-    let mut writer = OtaPartitionWriter::new(partition)?;
-    let bytes_written = download_https_firmware_image(stack, tls, download_url, &mut writer).await?;
-    writer.finish()?;
-    drop(writer);
+    let bytes_written = download_https_firmware_image(stack, tls, download_url, partition).await?;
     updater
         .activate_next_partition()
         .map_err(|_| String::from("ota_activate_partition_failed"))?;
@@ -4021,7 +4070,7 @@ async fn perform_https_firmware_update(
 async fn download_http_firmware_image<F>(
     stack: NetStack<'static>,
     download_url: &espwaverider_core::release::ParsedDownloadUrl,
-    writer: &mut OtaPartitionWriter<'_, F>,
+    partition: esp_bootloader_esp_idf::partitions::FlashRegion<'_, F>,
 ) -> Result<usize, String>
 where
     F: NorFlash,
@@ -4030,9 +4079,9 @@ where
 
     for _ in 0..FIRMWARE_SYNC_MAX_REDIRECTS {
         let resolved_ip = resolve_download_host(stack, current_url.host.as_str()).await?;
-        let mut rx_buffer = [0_u8; HTTP_SOCKET_BUFFER_SIZE];
-        let mut tx_buffer = [0_u8; HTTP_SOCKET_BUFFER_SIZE];
-        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+        let mut rx_buffer = Box::new([0_u8; HTTP_SOCKET_BUFFER_SIZE]);
+        let mut tx_buffer = Box::new([0_u8; HTTP_SOCKET_BUFFER_SIZE]);
+        let mut socket = TcpSocket::new(stack, rx_buffer.as_mut(), tx_buffer.as_mut());
         socket
             .connect(IpEndpoint::new(IpAddress::Ipv4(resolved_ip), current_url.port))
             .await
@@ -4053,13 +4102,15 @@ where
         match header.status_code {
             200 => {
                 if let Some(content_length) = header.content_length {
-                    if content_length > writer.partition.capacity() {
+                    if content_length > partition.capacity() {
                         return Err(String::from("ota_image_exceeds_partition"));
                     }
                 }
 
-                if header.header_len < header_buffer.len() {
-                    let body_prefix = &header_buffer[header.header_len..];
+                let mut writer = OtaPartitionWriter::new(partition, header.content_length)?;
+
+                if header.header_len < header.bytes_filled {
+                    let body_prefix = &header_buffer[header.header_len..header.bytes_filled];
                     if !body_prefix.is_empty() {
                         writer.write_chunk(body_prefix)?;
                     }
@@ -4077,6 +4128,7 @@ where
                     writer.write_chunk(&read_buffer[..read])?;
                 }
 
+                writer.finish()?;
                 socket.close();
                 let _ = socket.flush().await;
                 return Ok(writer.total_bytes);
@@ -4119,7 +4171,7 @@ async fn download_https_firmware_image<F>(
     stack: NetStack<'static>,
     tls: TlsReference<'_>,
     download_url: &espwaverider_core::release::ParsedDownloadUrl,
-    writer: &mut OtaPartitionWriter<'_, F>,
+    partition: esp_bootloader_esp_idf::partitions::FlashRegion<'_, F>,
 ) -> Result<usize, String>
 where
     F: NorFlash,
@@ -4152,40 +4204,69 @@ where
             .await
             .map_err(|_| String::from("firmware_https_request_failed"))?;
 
-        let mut header_buffer = [0_u8; FIRMWARE_HTTP_HEADER_BUFFER_SIZE];
-    let header = read_http_response_header_io(&mut session, &mut header_buffer).await?;
+        let mut header_buffer = Box::new([0_u8; FIRMWARE_HTTP_HEADER_BUFFER_SIZE]);
+        let header = read_http_response_header_io(&mut session, header_buffer.as_mut()).await?;
 
         match header.status_code {
             200 => {
                 if let Some(content_length) = header.content_length {
-                    if content_length > writer.partition.capacity() {
+                    if content_length > partition.capacity() {
                         return Err(String::from("ota_image_exceeds_partition"));
                     }
                 }
 
-                if header.header_len < header_buffer.len() {
-                    let body_prefix = &header_buffer[header.header_len..];
+                let mut writer = OtaPartitionWriter::new(partition, header.content_length)?;
+                let expected_total = header.content_length;
+
+                let mut deferred_body_prefix = if header.header_len < header.bytes_filled {
+                    Some(&header_buffer[header.header_len..header.bytes_filled])
+                } else {
+                    None
+                };
+
+                let mut read_buffer = Box::new([0_u8; FIRMWARE_HTTP_READ_BUFFER_SIZE]);
+                loop {
+                    if let Some(expected_total) = expected_total {
+                        if writer.total_bytes >= expected_total {
+                            break;
+                        }
+                    }
+
+                    let read = match session.read(read_buffer.as_mut()).await {
+                        Ok(read) => read,
+                        Err(err) => {
+                            return Err(format_https_session_error("firmware_https_read_failed", &err));
+                        }
+                    };
+                    if read == 0 {
+                        break;
+                    }
+
+                    if let Some(body_prefix) = deferred_body_prefix.take() {
+                        if !body_prefix.is_empty() {
+                            writer.write_chunk(body_prefix)?;
+                        }
+                    }
+
+                    let write_len = if let Some(expected_total) = expected_total {
+                        read.min(expected_total.saturating_sub(writer.total_bytes))
+                    } else {
+                        read
+                    };
+                    if write_len == 0 {
+                        break;
+                    }
+                    writer.write_chunk(&read_buffer[..write_len])?;
+                }
+
+                if let Some(body_prefix) = deferred_body_prefix.take() {
                     if !body_prefix.is_empty() {
                         writer.write_chunk(body_prefix)?;
                     }
                 }
 
-                let mut read_buffer = [0_u8; FIRMWARE_HTTP_READ_BUFFER_SIZE];
-                loop {
-                    let read = session
-                        .read(&mut read_buffer)
-                        .await
-                        .map_err(|_| String::from("firmware_https_read_failed"))?;
-                    if read == 0 {
-                        break;
-                    }
-                    writer.write_chunk(&read_buffer[..read])?;
-                }
-
-                session
-                    .close()
-                    .await
-                    .map_err(|_| String::from("firmware_https_close_failed"))?;
+                writer.finish()?;
+                let _ = session.close().await;
                 return Ok(writer.total_bytes);
             }
             301 | 302 | 303 | 307 | 308 => {
@@ -4208,6 +4289,7 @@ where
 
     Err(String::from("firmware_http_redirect_limit"))
 }
+
 
 async fn resolve_download_host(stack: NetStack<'static>, host: &str) -> Result<Ipv4Address, String> {
     if let Some(ipv4) = parse_ipv4_address(host) {
@@ -4257,7 +4339,7 @@ async fn read_http_response_header_socket(
         }
     }
 
-    parse_http_response_header(buffer, header_end)
+    parse_http_response_header(buffer, filled, header_end)
 }
 
 #[cfg(feature = "https-ota")]
@@ -4295,11 +4377,12 @@ where
         }
     }
 
-    parse_http_response_header(buffer, header_end)
+    parse_http_response_header(buffer, filled, header_end)
 }
 
 fn parse_http_response_header(
     buffer: &[u8; FIRMWARE_HTTP_HEADER_BUFFER_SIZE],
+    bytes_filled: usize,
     header_end: Option<usize>,
 ) -> Result<HttpResponseHeader, String> {
     let Some(header_len) = header_end else {
@@ -4341,8 +4424,19 @@ fn parse_http_response_header(
         content_length,
         location,
         header_len,
+        bytes_filled,
     })
 }
+
+#[cfg(feature = "https-ota")]
+fn format_https_session_error(prefix: &str, err: &SessionError) -> String {
+    let mut message = String::from(prefix);
+    message.push(':');
+    message.push_str(err.to_string().as_str());
+
+    message
+}
+
 
 #[cfg(feature = "https-ota")]
 async fn write_all_io<T>(socket: &mut T, mut bytes: &[u8]) -> Result<(), ()>
@@ -4759,8 +4853,8 @@ fn push_json_string_string(payload: &mut String, value: &str) {
 
 fn open_settings_nvs(flash_storage: SettingsStorage) -> Result<SettingsNvs, ()> {
     let mut flash_storage = flash_storage;
-    let mut partition_table_bytes = [0_u8; PARTITION_TABLE_MAX_LEN];
-    let partition_table = read_partition_table(&mut flash_storage, &mut partition_table_bytes)
+    let mut partition_table_bytes = Box::new([0_u8; PARTITION_TABLE_MAX_LEN]);
+    let partition_table = read_partition_table(&mut flash_storage, partition_table_bytes.as_mut_slice())
         .map_err(|_| ())?;
     let partition = partition_table
         .find_partition(PartitionType::Data(DataPartitionSubType::Nvs))

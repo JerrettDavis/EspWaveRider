@@ -1,0 +1,78 @@
+[package]
+name = "mbedtls-rs-sys"
+version = "0.1.0"
+edition = "2021"
+links = "mbedtls"
+license = "MIT OR Apache-2.0"
+rust-version = "1.84"
+
+[lib]
+harness = false
+
+[features]
+default = []
+# Always generate the bindings during build, even if pre-built bindings for the build target are available
+force-generate-bindings = []
+# Use GCC instead of clang
+use-gcc = []
+# Force the use of the Espressif Riscv GCC toolchain, if the target is a `riscv32*-` target
+# If this feature is not enabled, the build will assume and use the "official" RiscV GCC toolchain:
+# https://github.com/riscv-collab/riscv-gnu-toolchain
+force-esp-riscv-gcc = ["use-gcc"]
+
+# Disable all or some hooks; this would preclude hooking custom HW-accelerated algos
+nohook = ["nohook-sha1", "nohook-sha256", "nohook-sha512", "nohook-exp-mod"]
+nohook-sha1 = []
+nohook-sha256 = []
+nohook-sha512 = []
+nohook-exp-mod = []
+# Enable timer/wall-clock hooks for custom time implementations
+hook-timer = []
+hook-wall-clock = ["hook-timer"] # 'hook-wall-clock' feature requires 'hook-timer' to be enabled. MbedTLS X.509 certificate validation requires both time() and gmtime_r() functions.
+
+# STD hook impls
+std = ["time"]
+
+# esp-hal hook impls
+esp32 = ["esp-hal/esp32", "crypto-bigint", "time"]
+esp32c2 = ["esp-hal/esp32c2", "time"]
+esp32c3 = ["esp-hal/esp32c3", "crypto-bigint", "time"]
+esp32c6 = ["esp-hal/esp32c6", "crypto-bigint", "time"]
+esp32h2 = ["esp-hal/esp32h2", "crypto-bigint", "time"]
+esp32s2 = ["esp-hal/esp32s2", "crypto-bigint", "time"]
+esp32s3 = ["esp-hal/esp32s3", "crypto-bigint", "time"]
+
+[dependencies]
+defmt = { version = "1", optional = true }
+log = { version = "0.4", optional = true }
+enumset = { version = "1", default-features = false }
+# For hooking
+digest = { version = "0.10", default-features = false }
+sha1 = { version = "0.10", default-features = false }
+# For some reason, `soft` results in enormous slowdowns on xtensa and riscv32
+sha2 = { version = "0.10", default-features = false, features = ["force-soft-compact"] }
+time = { version = "0.3", default-features = false, optional = true }
+critical-section = "1"
+
+# For esp-hal hook impls
+esp-hal = { version = "1", features = ["unstable"], optional = true }
+crypto-bigint = { version = "0.5.3", default-features = false, features = ["extra-sizes"], optional = true }
+
+# For embassy timer hook impl
+embassy-time = {version = "0.5", optional = true}
+
+# ESP-IDF: The mbedtls lib distributed with ESP-IDF is used
+# All other platforms: mbedtls libs and bindings are created on the fly
+[target.'cfg(target_os = "espidf")'.dependencies]
+esp-idf-sys = { version = "0.37", default-features = false }
+
+[build-dependencies]
+anyhow = "1"
+bindgen = "0.72"
+enumset = "1"
+env_logger = "0.11"
+log = "0.4"
+cmake = "0.1.52"
+cc = "1.1"
+fs_extra = "1.3"
+embuild = "0.33"

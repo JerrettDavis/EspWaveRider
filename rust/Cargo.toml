@@ -28,3 +28,7 @@ panic = "abort"
 [patch.crates-io]
 esp-radio = { path = "vendor/esp-radio" }
 
+[patch."https://github.com/esp-rs/mbedtls-rs"]
+mbedtls-rs = { path = "vendor/mbedtls-rs/mbedtls-rs" }
+mbedtls-rs-sys = { path = "vendor/mbedtls-rs/mbedtls-rs-sys" }
+
