@@ -1,3 +1,9 @@
+## [1.1.2](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.1...v1.1.2) (2026-06-02)
+
+### Fixes
+
+* smooth mmwave presence tracking ([5a95e8c](https://github.com/JerrettDavis/EspWaveRider/commit/5a95e8c6e7d44e4213333aba02bc6762526e18e0))
+
 ## [1.1.1](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.0...v1.1.1) (2026-06-02)
 
 ### Fixes
