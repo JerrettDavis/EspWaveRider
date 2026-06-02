@@ -71,6 +71,9 @@ static constexpr uint8_t RADAR_PRESENCE_PIN_MODE = kBoardProfile.radarPresencePi
 
 static constexpr uint32_t HEARTBEAT_MS = 1000;
 static constexpr uint32_t PRESENCE_POLL_MS = 25;
+static constexpr uint32_t RADAR_FRAME_FRESHNESS_MS = 350;
+static constexpr uint8_t PRESENCE_QUALIFY_SAMPLE_COUNT = 12;
+static constexpr uint8_t PRESENCE_RELEASE_SAMPLE_COUNT = 8;
 static constexpr uint32_t RADAR_IDLE_FRAME_GAP_MS = 20;
 static constexpr size_t RADAR_FRAME_BUFFER_SIZE = 256;
 static constexpr uint32_t WIFI_RETRY_MS = 10000;
@@ -88,10 +91,12 @@ static constexpr uint16_t LD2420_GATE_SIZE_CM = 70;
 static constexpr uint16_t LD2420_ACTIVE_GATE_FLOOR = 25;
 static constexpr uint8_t LD2420_MAX_ESTIMATED_PEOPLE = 4;
 static constexpr uint8_t LD2420_NEAR_FIELD_CLUTTER_MAX_GATE_INDEX = 1;
+static constexpr uint16_t LD2420_NEAR_FIELD_CLUTTER_MAX_REPORTED_DISTANCE_CM = 70;
 static constexpr uint16_t LD2420_NEAR_FIELD_CLUTTER_DISTANCE_DELTA_CM = 105;
 static constexpr uint8_t LD2420_NEAR_FIELD_CLUTTER_PEAK_SHARE_PERCENT = 45;
 static constexpr uint8_t LD2420_NEAR_FIELD_CLUTTER_BAND_GATES = 3;
 static constexpr uint8_t LD2420_NEAR_FIELD_CLUTTER_BAND_SHARE_PERCENT = 55;
+static constexpr uint8_t LD2420_REPORTED_TARGET_NEIGHBOR_MIN_MULTIPLIER = 20;
 static constexpr uint8_t MAX_ROOM_PEERS = 8;
 static constexpr uint32_t ROOM_PEER_FRESHNESS_MS = 15000;
 static constexpr uint16_t ROOM_DISTANCE_SEPARATION_CM = 140;
@@ -260,6 +265,7 @@ struct UdpDiscoveryPeer {
 
 struct LatestEnergyFrameSnapshot {
   bool valid = false;
+  uint32_t updatedAtMs = 0;
   size_t length = 0;
   uint16_t payloadLength = 0;
   bool presence = false;
@@ -284,6 +290,7 @@ struct RadarDerivedMetrics {
 
 struct LatestTextFrameSnapshot {
   bool valid = false;
+  uint32_t updatedAtMs = 0;
   size_t length = 0;
   bool presence = false;
   int range = -1;
@@ -295,6 +302,7 @@ struct LatestTextFrameSnapshot {
 
 struct LatestGenericFrameSnapshot {
   bool valid = false;
+  uint32_t updatedAtMs = 0;
   size_t length = 0;
   uint32_t bytesTotal = 0;
   uint32_t framesTotal = 0;
@@ -445,6 +453,7 @@ uint32_t lastRadarByteMs = 0;
 
 bool lastPresence = false;
 bool lastGpioPresence = false;
+bool rawDetectionCandidateActive = false;
 bool detectionCandidateActive = false;
 bool presenceInitialized = false;
 bool homeAssistantDiscoveryPublished = false;
@@ -459,6 +468,8 @@ uint32_t radarFramesTotal = 0;
 uint32_t ld2420EnergyFramesTotal = 0;
 uint32_t presenceChangesTotal = 0;
 uint32_t lastDetectionMs = 0;
+uint8_t presenceCandidateHitCount = 0;
+uint8_t presenceCandidateMissCount = 0;
 uint32_t lastWiFiConnectAttemptMs = 0;
 uint32_t lastMqttConnectAttemptMs = 0;
 
@@ -620,6 +631,7 @@ void publishHomeAssistantDiagnostics();
 void publishHomeAssistantDerivedMetrics();
 void publishHomeAssistantStates();
 RadarDerivedMetrics buildRadarDerivedMetrics();
+bool isRadarFrameFresh(uint32_t updatedAtMs, uint32_t now);
 RadarDerivedMetrics buildRadarDerivedMetrics(const LatestEnergyFrameSnapshot* energyFrame,
                                             const LatestTextFrameSnapshot* textFrame,
                                             bool gpioPresence);
@@ -843,6 +855,10 @@ String buildDeviceSnapshotJson(int32_t energySince,
   json += lastGpioPresence ? "true" : "false";
   json += ",\"detection_candidate\":";
   json += detectionCandidateActive ? "true" : "false";
+  json += ",\"raw_detection_candidate\":";
+  json += rawDetectionCandidateActive ? "true" : "false";
+  json += ",\"presence_candidate_hits\":" + String(presenceCandidateHitCount);
+  json += ",\"presence_candidate_misses\":" + String(presenceCandidateMissCount);
   json += ",\"presence_decay_remaining_ms\":" + String(presenceDecayRemainingMs(now));
   json += ",\"radar_bytes_total\":" + String(radarBytesTotal);
   json += ",\"radar_frames_total\":" + String(radarFramesTotal);
@@ -910,6 +926,7 @@ String buildDeviceSnapshotJson(int32_t energySince,
     json += "{";
     json += "\"length\":" + String(latestEnergyFrameSnapshot.length);
     json += ",\"payload_length\":" + String(latestEnergyFrameSnapshot.payloadLength);
+    json += ",\"age_ms\":" + String(now - latestEnergyFrameSnapshot.updatedAtMs);
     json += ",\"presence\":";
     json += latestEnergyFrameSnapshot.presence ? "true" : "false";
     json += ",\"distance_cm\":" + String(latestEnergyFrameSnapshot.distanceCm);
@@ -932,6 +949,7 @@ String buildDeviceSnapshotJson(int32_t energySince,
   if (latestTextFrameSnapshot.valid && static_cast<int32_t>(latestTextFrameSnapshot.framesTotal) != textSince) {
     json += "{";
     json += "\"length\":" + String(latestTextFrameSnapshot.length);
+    json += ",\"age_ms\":" + String(now - latestTextFrameSnapshot.updatedAtMs);
     json += ",\"presence\":";
     json += latestTextFrameSnapshot.presence ? "true" : "false";
     json += ",\"range\":" + String(latestTextFrameSnapshot.range);
@@ -948,6 +966,7 @@ String buildDeviceSnapshotJson(int32_t energySince,
   if (latestGenericFrameSnapshot.valid && static_cast<int32_t>(latestGenericFrameSnapshot.framesTotal) != genericSince) {
     json += "{";
     json += "\"length\":" + String(latestGenericFrameSnapshot.length);
+    json += ",\"age_ms\":" + String(now - latestGenericFrameSnapshot.updatedAtMs);
     json += ",\"bytes_total\":" + String(latestGenericFrameSnapshot.bytesTotal);
     json += ",\"frames_total\":" + String(latestGenericFrameSnapshot.framesTotal);
     json += ",\"hex\":\"" + jsonEscape(latestGenericFrameSnapshot.hex) + "\"";
@@ -993,11 +1012,12 @@ const char* statusLedPhase(uint32_t now) {
 
 String buildDebugStatusJson() {
   RadarDerivedMetrics metrics = buildRadarDerivedMetrics();
-  const LatestEnergyFrameSnapshot* energyFrame = latestEnergyFrameSnapshot.valid ? &latestEnergyFrameSnapshot : nullptr;
+  const uint32_t now = millis();
+  const bool freshEnergyFrame = latestEnergyFrameSnapshot.valid && isRadarFrameFresh(latestEnergyFrameSnapshot.updatedAtMs, now);
+  const LatestEnergyFrameSnapshot* energyFrame = freshEnergyFrame ? &latestEnergyFrameSnapshot : nullptr;
   const RadarDetectionDecision decision = radarDetectionDecision(metrics, energyFrame, runtimeConfig);
   const bool gpioFallback = lastGpioPresence && !latestEnergyFrameSnapshot.valid && !latestTextFrameSnapshot.valid;
   const bool radarCandidate = decision == RadarDetectionDecision::Candidate;
-  const uint32_t now = millis();
 
   String json;
   json.reserve(512);
@@ -1009,6 +1029,8 @@ String buildDebugStatusJson() {
   json += "\"";
   json += ",\"detection_candidate\":";
   json += detectionCandidateActive ? "true" : "false";
+  json += ",\"raw_detection_candidate\":";
+  json += rawDetectionCandidateActive ? "true" : "false";
   json += ",\"presence\":";
   json += lastPresence ? "true" : "false";
   json += ",\"gpio_presence\":";
@@ -1020,6 +1042,8 @@ String buildDebugStatusJson() {
   json += ",\"clutter_suppressed\":";
   json += decision == RadarDetectionDecision::NearFieldClutter ? "true" : "false";
   json += ",\"presence_decay_remaining_ms\":" + String(presenceDecayRemainingMs(now));
+  json += ",\"presence_candidate_hits\":" + String(presenceCandidateHitCount);
+  json += ",\"presence_candidate_misses\":" + String(presenceCandidateMissCount);
   json += ",\"effective_min_gate_energy\":" + String(effectiveMinGateEnergy(runtimeConfig));
   json += ",\"effective_min_activity_score\":" + String(effectiveMinActivityScore(runtimeConfig));
   json += ",\"active_gate_count\":" + String(metrics.activeGateCount);
@@ -2203,23 +2227,9 @@ bool energyFrameLooksLikeNearFieldClutter(const RadarDerivedMetrics& metrics, co
     return false;
   }
 
-  if ((reportedDistanceCm - metrics.dominantGateDistanceCm) < LD2420_NEAR_FIELD_CLUTTER_DISTANCE_DELTA_CM) {
-    return false;
-  }
-
   uint32_t nearFieldBandEnergy = 0;
   for (uint8_t gateIndex = 0; gateIndex < min<uint8_t>(LD2420_GATE_COUNT, LD2420_NEAR_FIELD_CLUTTER_BAND_GATES); gateIndex++) {
     nearFieldBandEnergy += energyFrame.gates[gateIndex];
-  }
-
-  const uint32_t nearFieldBandSharePercent = (nearFieldBandEnergy * 100UL) / metrics.totalGateEnergy;
-  if (nearFieldBandSharePercent >= LD2420_NEAR_FIELD_CLUTTER_BAND_SHARE_PERCENT) {
-    return true;
-  }
-
-  const uint32_t peakSharePercent = (static_cast<uint32_t>(metrics.dominantGateEnergy) * 100UL) / metrics.totalGateEnergy;
-  if (peakSharePercent < LD2420_NEAR_FIELD_CLUTTER_PEAK_SHARE_PERCENT) {
-    return false;
   }
 
   int reportedGateIndex = (reportedDistanceCm + (LD2420_GATE_SIZE_CM / 2)) / LD2420_GATE_SIZE_CM;
@@ -2233,12 +2243,34 @@ bool energyFrameLooksLikeNearFieldClutter(const RadarDerivedMetrics& metrics, co
     reportedNeighborhoodEnergy += energyFrame.gates[reportedGateIndex + 1];
   }
 
-  return metrics.dominantGateEnergy > reportedNeighborhoodEnergy;
+  const bool reportedTargetHasEvidence =
+    reportedDistanceCm > LD2420_NEAR_FIELD_CLUTTER_MAX_REPORTED_DISTANCE_CM &&
+    reportedNeighborhoodEnergy >= (static_cast<uint32_t>(effectiveMinGateEnergy(runtimeConfig)) *
+                                   LD2420_REPORTED_TARGET_NEIGHBOR_MIN_MULTIPLIER);
+
+  const uint32_t nearFieldBandSharePercent = (nearFieldBandEnergy * 100UL) / metrics.totalGateEnergy;
+  if (nearFieldBandSharePercent >= LD2420_NEAR_FIELD_CLUTTER_BAND_SHARE_PERCENT) {
+    return !reportedTargetHasEvidence;
+  }
+
+  if ((reportedDistanceCm - metrics.dominantGateDistanceCm) < LD2420_NEAR_FIELD_CLUTTER_DISTANCE_DELTA_CM &&
+      reportedDistanceCm > LD2420_NEAR_FIELD_CLUTTER_MAX_REPORTED_DISTANCE_CM) {
+    return false;
+  }
+
+  const uint32_t peakSharePercent = (static_cast<uint32_t>(metrics.dominantGateEnergy) * 100UL) / metrics.totalGateEnergy;
+  if (peakSharePercent < LD2420_NEAR_FIELD_CLUTTER_PEAK_SHARE_PERCENT) {
+    return false;
+  }
+
+  return !reportedTargetHasEvidence && metrics.dominantGateEnergy > reportedNeighborhoodEnergy;
 }
 
 bool radarDetectionCandidate(const RadarDerivedMetrics& metrics) {
   return radarDetectionDecision(metrics,
-                                latestEnergyFrameSnapshot.valid ? &latestEnergyFrameSnapshot : nullptr,
+                                latestEnergyFrameSnapshot.valid && isRadarFrameFresh(latestEnergyFrameSnapshot.updatedAtMs, millis())
+                                  ? &latestEnergyFrameSnapshot
+                                  : nullptr,
                                 runtimeConfig) == RadarDetectionDecision::Candidate;
 }
 
@@ -2250,7 +2282,9 @@ bool radarDetectionCandidate(const RadarDerivedMetrics& metrics,
 
 RadarDetectionDecision radarDetectionDecision(const RadarDerivedMetrics& metrics) {
   return radarDetectionDecision(metrics,
-                                latestEnergyFrameSnapshot.valid ? &latestEnergyFrameSnapshot : nullptr,
+                                latestEnergyFrameSnapshot.valid && isRadarFrameFresh(latestEnergyFrameSnapshot.updatedAtMs, millis())
+                                  ? &latestEnergyFrameSnapshot
+                                  : nullptr,
                                 runtimeConfig);
 }
 
@@ -2364,9 +2398,18 @@ void publishHomeAssistantAvailability(bool online) {
 }
 
 RadarDerivedMetrics buildRadarDerivedMetrics() {
-  return buildRadarDerivedMetrics(latestEnergyFrameSnapshot.valid ? &latestEnergyFrameSnapshot : nullptr,
-                                  latestTextFrameSnapshot.valid ? &latestTextFrameSnapshot : nullptr,
+  const uint32_t now = millis();
+  return buildRadarDerivedMetrics(latestEnergyFrameSnapshot.valid && isRadarFrameFresh(latestEnergyFrameSnapshot.updatedAtMs, now)
+                                    ? &latestEnergyFrameSnapshot
+                                    : nullptr,
+                                  latestTextFrameSnapshot.valid && isRadarFrameFresh(latestTextFrameSnapshot.updatedAtMs, now)
+                                    ? &latestTextFrameSnapshot
+                                    : nullptr,
                                   presenceInitialized ? lastGpioPresence : false);
+}
+
+bool isRadarFrameFresh(uint32_t updatedAtMs, uint32_t now) {
+  return updatedAtMs > 0 && (now - updatedAtMs) <= RADAR_FRAME_FRESHNESS_MS;
 }
 
 RadarDerivedMetrics buildRadarDerivedMetrics(const LatestEnergyFrameSnapshot* energyFrame,
@@ -3955,6 +3998,15 @@ void emitHeartbeatEvent() {
   Serial.print(",\"detection_candidate\":");
   Serial.print(detectionCandidateActive ? "true" : "false");
 
+  Serial.print(",\"raw_detection_candidate\":");
+  Serial.print(rawDetectionCandidateActive ? "true" : "false");
+
+  Serial.print(",\"presence_candidate_hits\":");
+  Serial.print(presenceCandidateHitCount);
+
+  Serial.print(",\"presence_candidate_misses\":");
+  Serial.print(presenceCandidateMissCount);
+
   Serial.print(",\"presence_decay_remaining_ms\":");
   Serial.print(presenceDecayRemainingMs(millis()));
 
@@ -4013,6 +4065,15 @@ void emitPresenceEvent(bool presence, bool changed) {
   Serial.print(",\"detection_candidate\":");
   Serial.print(detectionCandidateActive ? "true" : "false");
 
+  Serial.print(",\"raw_detection_candidate\":");
+  Serial.print(rawDetectionCandidateActive ? "true" : "false");
+
+  Serial.print(",\"presence_candidate_hits\":");
+  Serial.print(presenceCandidateHitCount);
+
+  Serial.print(",\"presence_candidate_misses\":");
+  Serial.print(presenceCandidateMissCount);
+
   Serial.print(",\"pin\":");
   Serial.print(RADAR_PRESENCE_PIN);
 
@@ -4064,6 +4125,7 @@ void emitTextRangeFrame(const uint8_t* data, size_t length, const String& ascii)
 
   updateDistanceCm(range);
   latestTextFrameSnapshot.valid = true;
+  latestTextFrameSnapshot.updatedAtMs = millis();
   latestTextFrameSnapshot.length = length;
   latestTextFrameSnapshot.presence = presence;
   latestTextFrameSnapshot.range = range;
@@ -4149,6 +4211,7 @@ size_t decodeHexBytes(const char* hex, uint8_t* output, size_t capacity) {
 
 void buildGenericFrameSnapshot(const uint8_t* data, size_t length, LatestGenericFrameSnapshot& snapshot) {
   snapshot.valid = true;
+  snapshot.updatedAtMs = millis();
   snapshot.length = length;
   snapshot.bytesTotal = length;
   snapshot.framesTotal = 1;
@@ -4166,6 +4229,7 @@ bool parseLd2420EnergyFrame(const uint8_t* data, size_t len, LatestEnergyFrameSn
   }
 
   snapshot.valid = true;
+  snapshot.updatedAtMs = millis();
   snapshot.length = len;
   snapshot.payloadLength = readLe16(data, 4);
   snapshot.presence = data[6] != 0;
@@ -4549,6 +4613,7 @@ void emitRadarFrameEvent(const uint8_t* data, size_t length) {
 
   radarFramesTotal++;
   latestGenericFrameSnapshot.valid = true;
+  latestGenericFrameSnapshot.updatedAtMs = millis();
   latestGenericFrameSnapshot.length = length;
   latestGenericFrameSnapshot.bytesTotal = radarBytesTotal;
   latestGenericFrameSnapshot.framesTotal = radarFramesTotal;
@@ -4671,7 +4736,22 @@ void pollPresence() {
   RadarDerivedMetrics metrics = buildRadarDerivedMetrics();
   bool radarCandidate = radarDetectionCandidate(metrics);
   bool gpioFallback = lastGpioPresence && !latestEnergyFrameSnapshot.valid && !latestTextFrameSnapshot.valid;
-  detectionCandidateActive = radarCandidate || gpioFallback;
+  rawDetectionCandidateActive = radarCandidate || gpioFallback;
+
+  if (rawDetectionCandidateActive) {
+    presenceCandidateHitCount = min<uint8_t>(PRESENCE_QUALIFY_SAMPLE_COUNT, presenceCandidateHitCount + 1);
+    presenceCandidateMissCount = 0;
+  } else {
+    presenceCandidateMissCount = min<uint8_t>(PRESENCE_RELEASE_SAMPLE_COUNT, presenceCandidateMissCount + 1);
+    if (presenceCandidateMissCount >= PRESENCE_RELEASE_SAMPLE_COUNT) {
+      presenceCandidateHitCount = 0;
+      detectionCandidateActive = false;
+    }
+  }
+
+  if (presenceCandidateHitCount >= PRESENCE_QUALIFY_SAMPLE_COUNT) {
+    detectionCandidateActive = true;
+  }
 
   if (detectionCandidateActive) {
     lastDetectionMs = now;

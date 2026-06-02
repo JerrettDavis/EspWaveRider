@@ -104,6 +104,8 @@ tuning_config:<max_range_cm>|<min_gate_energy>|<sensitivity_pct>|<presence_hold_
 
 This controls detection range, gate energy thresholding, presence hold debounce, activity scoring, and LED behavior.
 
+The firmware also applies a short stability filter before it reports filtered presence: radar candidates must remain fresh and sustain for multiple polling samples before `detection_candidate` becomes true. Near-field gate 0/1 clutter is suppressed unless the reported target distance has enough supporting gate energy behind it, which lets real occupants qualify while idle self-noise stays filtered. Diagnostics expose `raw_detection_candidate`, `presence_candidate_hits`, `presence_candidate_misses`, and radar frame `age_ms` so installers can distinguish real sustained occupancy from stale frames or intermittent mmWave noise.
+
 Example:
 
 ```text
