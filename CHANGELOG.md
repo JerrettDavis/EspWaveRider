@@ -1,3 +1,9 @@
+## [1.1.1](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.0...v1.1.1) (2026-06-02)
+
+### Fixes
+
+* stabilize mmwave presence detection ([e263d49](https://github.com/JerrettDavis/EspWaveRider/commit/e263d49331deefb1c25b645b3bb3e8ab71dc061e))
+
 ## [1.1.0](https://github.com/JerrettDavis/EspWaveRider/compare/v1.0.2...v1.1.0) (2026-05-31)
 
 ### Features
