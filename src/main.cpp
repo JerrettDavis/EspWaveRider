@@ -71,9 +71,9 @@ static constexpr uint8_t RADAR_PRESENCE_PIN_MODE = kBoardProfile.radarPresencePi
 
 static constexpr uint32_t HEARTBEAT_MS = 1000;
 static constexpr uint32_t PRESENCE_POLL_MS = 25;
-static constexpr uint32_t RADAR_FRAME_FRESHNESS_MS = 350;
-static constexpr uint8_t PRESENCE_QUALIFY_SAMPLE_COUNT = 12;
-static constexpr uint8_t PRESENCE_RELEASE_SAMPLE_COUNT = 8;
+static constexpr uint32_t RADAR_FRAME_FRESHNESS_MS = 1000;
+static constexpr uint8_t PRESENCE_QUALIFY_SAMPLE_COUNT = 4;
+static constexpr uint8_t PRESENCE_RELEASE_SAMPLE_COUNT = 80;
 static constexpr uint32_t RADAR_IDLE_FRAME_GAP_MS = 20;
 static constexpr size_t RADAR_FRAME_BUFFER_SIZE = 256;
 static constexpr uint32_t WIFI_RETRY_MS = 10000;
