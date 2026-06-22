@@ -54,6 +54,8 @@ updates:
       prefix: "chore(deps)"
     cooldown:
       default-days: 2
+    ignore:
+      - dependency-name: "undici"
     groups:
       npm-dependencies:
         patterns:
