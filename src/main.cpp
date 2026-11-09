@@ -3465,7 +3465,7 @@ bool downloadAndApplyFirmware(const String& downloadUrl, const String& expectedS
 
   mbedtls_sha256_context sha256Context;
   mbedtls_sha256_init(&sha256Context);
-  mbedtls_sha256_starts_ret(&sha256Context, 0);
+  mbedtls_sha256_starts(&sha256Context, 0);
 
   WiFiClient* stream = http.getStreamPtr();
   static uint8_t buffer[FIRMWARE_DOWNLOAD_BUFFER_SIZE];
@@ -3493,7 +3493,7 @@ bool downloadAndApplyFirmware(const String& downloadUrl, const String& expectedS
     }
 
     lastChunkMs = millis();
-    mbedtls_sha256_update_ret(&sha256Context, buffer, chunkSize);
+    mbedtls_sha256_update(&sha256Context, buffer, chunkSize);
 
     if (Update.write(buffer, chunkSize) != chunkSize) {
       error = String("update_write_failed:") + Update.errorString();
@@ -3516,7 +3516,7 @@ bool downloadAndApplyFirmware(const String& downloadUrl, const String& expectedS
   }
 
   uint8_t actualDigestBytes[32];
-  mbedtls_sha256_finish_ret(&sha256Context, actualDigestBytes);
+  mbedtls_sha256_finish(&sha256Context, actualDigestBytes);
   mbedtls_sha256_free(&sha256Context);
 
   static constexpr char HEX_DIGITS[] = "0123456789abcdef";
