@@ -125,7 +125,7 @@ jobs:
         id: semantic
         uses: cycjimmy/semantic-release-action@v8
         with:
-          semantic_version: 24
+          semantic_version: 25
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

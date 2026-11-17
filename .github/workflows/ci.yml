@@ -95,6 +95,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test release notes compatibility
+        run: npm run test:release-notes
+
       - name: Run semantic-release dry-run
         run: npx semantic-release --dry-run --no-ci
         env:
