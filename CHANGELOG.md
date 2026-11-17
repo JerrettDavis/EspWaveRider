@@ -1,3 +1,37 @@
+## [1.1.5](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.4...v1.1.5) (2026-11-17)
+
+### Fixes
+
+* resume firmware assets when retrying a published release ([41012d5](https://github.com/JerrettDavis/EspWaveRider/commit/41012d5c55b589b2a7f2c0c2ee0487f2cf09a3c8))
+
+## [1.1.4](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.3...v1.1.4) (2026-11-17)
+
+### Fixes
+
+* align release notes writer with conventional commits preset ([f8e89a8](https://github.com/JerrettDavis/EspWaveRider/commit/f8e89a8dcc3f31fb13834aea6747028c368cee6c))
+* **firmware:** use non-deprecated mbedtls_sha256 API ([#32](https://github.com/JerrettDavis/EspWaveRider/issues/32)) ([6815ad4](https://github.com/JerrettDavis/EspWaveRider/commit/6815ad4a4c91e46470c1a73fe00c455c3677882c))
+* make upgraded changelog writer consistent across consumers ([aeed02b](https://github.com/JerrettDavis/EspWaveRider/commit/aeed02b70b7cc55a8c2dfe9360e6981da51e5a94))
+* propose release changelog updates through protected pull requests ([53718da](https://github.com/JerrettDavis/EspWaveRider/commit/53718da3a5d5f9db886ea881e6e20653d5f4fa3c))
+* release using the locked project dependency graph ([d3395db](https://github.com/JerrettDavis/EspWaveRider/commit/d3395db507f7320479eaddcd5bded01981636ebd))
+
+### CI
+
+* add dependabot auto-merge workflow ([#25](https://github.com/JerrettDavis/EspWaveRider/issues/25)) ([090edcb](https://github.com/JerrettDavis/EspWaveRider/commit/090edcb16462388710be81f728f72867d35166a5))
+
+### Chores
+
+* **deps:** bump @playwright/test ([#29](https://github.com/JerrettDavis/EspWaveRider/issues/29)) ([ad7300e](https://github.com/JerrettDavis/EspWaveRider/commit/ad7300e2e6133feb039f99fee3511f7abbdd8053))
+* **deps:** bump @playwright/test ([#31](https://github.com/JerrettDavis/EspWaveRider/issues/31)) ([a841194](https://github.com/JerrettDavis/EspWaveRider/commit/a84119405a0c7f4de0066f883413cc607680402c))
+* **deps:** bump @playwright/test in the npm-dependencies group ([#23](https://github.com/JerrettDavis/EspWaveRider/issues/23)) ([dd22af5](https://github.com/JerrettDavis/EspWaveRider/commit/dd22af5bdde03f9f3d08faa658afbc5f576b6eea))
+* **deps:** bump @semantic-release/github in the npm-dependencies group ([#26](https://github.com/JerrettDavis/EspWaveRider/issues/26)) ([ba25dc8](https://github.com/JerrettDavis/EspWaveRider/commit/ba25dc8635293a76bf55a1aa52d800d3d04e6ab5))
+* **deps:** bump conventional-changelog-conventionalcommits ([#22](https://github.com/JerrettDavis/EspWaveRider/issues/22)) ([57f82e5](https://github.com/JerrettDavis/EspWaveRider/commit/57f82e5bd1be7a8f3a36d5c682b6128d70958556))
+* **deps:** bump handlebars from 4.7.9 to 4.7.10 ([#27](https://github.com/JerrettDavis/EspWaveRider/issues/27)) ([368d1fb](https://github.com/JerrettDavis/EspWaveRider/commit/368d1fb00b1bb15603410a34f02e678fe7b41aa6))
+* **deps:** bump js-yaml from 4.3.1 to 4.3.2 ([#24](https://github.com/JerrettDavis/EspWaveRider/issues/24)) ([5299833](https://github.com/JerrettDavis/EspWaveRider/commit/5299833d558ba359f1aa802e5b740f8a0fa890f0))
+* **deps:** bump the github-actions-dependencies group with 2 updates ([#30](https://github.com/JerrettDavis/EspWaveRider/issues/30)) ([d5186c7](https://github.com/JerrettDavis/EspWaveRider/commit/d5186c7451f74ec4b1cb292626805898ec3331a5))
+* **deps:** bump the npm-dependencies group across 1 directory with 3 updates ([#20](https://github.com/JerrettDavis/EspWaveRider/issues/20)) ([e2fb7e9](https://github.com/JerrettDavis/EspWaveRider/commit/e2fb7e953e097625e57c5594a9c9aa6ffcd4e6e0))
+* **deps:** bump the npm-dependencies group with 2 updates ([#28](https://github.com/JerrettDavis/EspWaveRider/issues/28)) ([a4821a1](https://github.com/JerrettDavis/EspWaveRider/commit/a4821a13b91d08e1195c8fc7c675255bc18083e6))
+* **deps:** bump the npm-dependencies group with 2 updates ([#33](https://github.com/JerrettDavis/EspWaveRider/issues/33)) ([0e7fc89](https://github.com/JerrettDavis/EspWaveRider/commit/0e7fc89a11c24d3c85ddeb38b95c3c4f221e6117))
+
 ## [1.1.3](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.2...v1.1.3) (2026-08-19)
 
 ## [1.1.2](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.1...v1.1.2) (2026-06-02)
