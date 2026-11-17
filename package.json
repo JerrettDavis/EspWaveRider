@@ -14,7 +14,7 @@
     "test:e2e:local": "playwright test --project live-devices",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",
-    "test:release-notes": "node --test scripts/test-release-notes.mjs"
+    "test:release-notes": "node --test scripts/test-release-notes.mjs scripts/test-release-outputs.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",
