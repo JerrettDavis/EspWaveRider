@@ -1,3 +1,9 @@
+## [1.1.5](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.4...v1.1.5) (2026-11-17)
+
+### Fixes
+
+* resume firmware assets when retrying a published release ([41012d5](https://github.com/JerrettDavis/EspWaveRider/commit/41012d5c55b589b2a7f2c0c2ee0487f2cf09a3c8))
+
 ## [1.1.3](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.2...v1.1.3) (2026-08-19)
 
 ## [1.1.2](https://github.com/JerrettDavis/EspWaveRider/compare/v1.1.1...v1.1.2) (2026-06-02)
