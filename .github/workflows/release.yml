@@ -127,6 +127,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Propose release changelog update
+        if: steps.semantic.outputs.new_release_published == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          base: main
+          branch: release/changelog-${{ steps.semantic.outputs.new_release_version }}
+          commit-message: "chore(release): update changelog for ${{ steps.semantic.outputs.new_release_version }}"
+          title: "chore(release): update changelog for ${{ steps.semantic.outputs.new_release_version }}"
+          body: "Update the committed changelog from the published release. This uses a pull request so required checks apply."
+          add-paths: CHANGELOG.md
+          delete-branch: true
   build-release-binaries:
     needs: semantic-release
     if: needs.semantic-release.outputs.published == 'true'
