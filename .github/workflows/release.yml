@@ -123,9 +123,7 @@ jobs:
 
       - name: Create semantic versioned release
         id: semantic
-        uses: cycjimmy/semantic-release-action@v8
-        with:
-          semantic_version: 25
+        run: node scripts/release.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
